@@ -23,12 +23,31 @@
       .toString()
       .trim()
       .toLowerCase()
+      .replace(/ё/g, 'е')
       .replace(/\s+/g, ' ')
-      .replace(/[.,!?;:"'`]/g, '');
+      .replace(/[.,!?;:"'`()\[\]{}]/g, '');
+  }
+
+  function answerVariants(str) {
+    return (str || '').toString().split(/\s*(?:[,;/|]|\s+или\s+)\s*/i).map(normalize).filter(Boolean);
+  }
+
+  function sameWordsInAnyOrder(a, b) {
+    // Russian word order is flexible. Accept the same set of words in a
+    // different order, but only when the expected answer is in Cyrillic.
+    if (!/[а-яё]/i.test(b)) return false;
+    const left = normalize(a).split(' ').filter(Boolean).sort();
+    const right = normalize(b).split(' ').filter(Boolean).sort();
+    return left.length === right.length && left.every((word, i) => word === right[i]);
   }
 
   function answersMatch(a, b) {
-    return normalize(a) === normalize(b);
+    const actual = answerVariants(a);
+    const expected = answerVariants(b);
+    if (actual.length === 0 || expected.length === 0) return false;
+    return actual.some((given) => expected.some((answer) =>
+      given === answer || sameWordsInAnyOrder(given, answer)
+    ));
   }
 
   // ---- 1. Multiple choice ------------------------------------------------
@@ -171,6 +190,7 @@
   global.VocabExercises = {
     shuffle,
     normalize,
+    answerVariants,
     answersMatch,
     buildMultipleChoice,
     buildTypeAnswer,

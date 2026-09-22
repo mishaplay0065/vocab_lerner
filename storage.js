@@ -195,14 +195,21 @@
     }
 
     /** Creates a new set from already-built term objects (see srs.makeTerm). */
-    async createSet(name, terms) {
+    async createSet(name, terms, language) {
       const id = this._newId();
       const chunks = packIntoChunks(terms);
       await Promise.all(chunks.map((chunk, idx) =>
         this.backend.setItem(`s_${id}_${idx}`, JSON.stringify(chunk))
       ));
       const sets = await this.listSets();
-      sets.push({ id, name, createdAt: Date.now(), termCount: terms.length, chunkCount: Math.max(chunks.length, 1) });
+      sets.push({
+        id,
+        name,
+        language: language || 'mixed',
+        createdAt: Date.now(),
+        termCount: terms.length,
+        chunkCount: Math.max(chunks.length, 1)
+      });
       await this._saveSetsIndex(sets);
       await this.setActiveSetId(id);
       return id;

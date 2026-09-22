@@ -43,6 +43,14 @@
     <label class="field-label" for="setNameInput">Название набора</label>
     <input type="text" id="setNameInput" class="text-input" placeholder="Например: English A1" maxlength="60">
 
+    <label class="field-label" for="setLanguageSelect">Язык слов</label>
+    <select id="setLanguageSelect" class="text-input language-select">
+      <option value="auto">Определить автоматически</option>
+      <option value="en">Английский</option>
+      <option value="de">Немецкий</option>
+      <option value="mixed">Смешанный набор</option>
+    </select>
+
     <label class="dropzone" id="dropzone" for="fileInput">
       <div class="dropzone-icon">＋</div>
       <div class="dropzone-text">Выбрать CSV-файл</div>
@@ -83,10 +91,11 @@
 
   <!-- ===================== REVIEW SCREEN ===================== -->
   <section class="screen" id="screen-review" hidden>
+    <button class="btn btn-primary btn-quick-review" id="btnQuickReview">Повторить сейчас</button>
     <div class="stat-grid" id="reviewStats"></div>
 
     <div class="tabs" id="reviewTabs">
-      <button class="tab active" data-filter="due">Повторить</button>
+      <button class="tab active" data-filter="due">По расписанию</button>
       <button class="tab" data-filter="difficult">Сложные</button>
       <button class="tab" data-filter="learned">Изученные</button>
       <button class="tab" data-filter="stale">Давно не видел</button>

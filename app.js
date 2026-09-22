@@ -38,6 +38,8 @@
   ].join('\n');
 
   const SESSION_SIZE = 10;
+  const ALL_SETS_ID = '__all__';
+  const LANGUAGE_LABELS = { en: 'Английский', de: 'Немецкий', mixed: 'Смешанные' };
 
   // ---------------------------------------------------------------------
   // State
@@ -47,7 +49,8 @@
     sets: [],                 // [{id, name, createdAt, termCount, chunkCount}]
     activeSetId: null,
     terms: [],                 // terms of the active set
-    chunkMap: new Map(),  // termId -> chunk index, for cheap partial saves
+    chunkMap: new Map(),       // termId -> {setId, chunkIdx}, for cheap partial saves
+    termMeta: new Map(),       // termId -> {setId, setName, language}
     settings: null,
     screen: 'loading',       // loading | import | learn | review | progress
     importMode: 'first',    // 'first' (no sets yet) | 'add' (adding another set)
@@ -104,6 +107,29 @@
     return d.innerHTML;
   }
 
+  function detectTermLanguage(text) {
+    const value = (text || '').trim();
+    return /[äöüß]/i.test(value) || /\b(?:der|die|das|ein|eine|einen|einem|einer|nicht|sich|zu)\b/i.test(value)
+      ? 'de'
+      : 'en';
+  }
+
+  function inferSetLanguage(terms) {
+    const languages = new Set(terms.map((term) => detectTermLanguage(term.term)));
+    if (languages.size === 1) return [...languages][0];
+    return 'mixed';
+  }
+
+  function languageLabel(language) {
+    return LANGUAGE_LABELS[language] || LANGUAGE_LABELS.mixed;
+  }
+
+  function termSourceLabel(term) {
+    const meta = state.termMeta.get(term.id);
+    if (!meta) return '';
+    return `${languageLabel(meta.language)} · ${meta.setName}`;
+  }
+
   // ---------------------------------------------------------------------
   // Screen navigation
   // ---------------------------------------------------------------------
@@ -143,9 +169,19 @@
   // Set switcher (header dropdown + add/delete)
   // ---------------------------------------------------------------------
   function renderSetSwitcher() {
-    el.setSelect.innerHTML = state.sets.map((s) =>
-      `<option value="${escapeHtml(s.id)}" ${s.id === state.activeSetId ? 'selected' : ''}>${escapeHtml(s.name)} (${s.termCount})</option>`
-    ).join('');
+    const groups = { en: [], de: [], mixed: [] };
+    state.sets.forEach((set) => (groups[set.language] || groups.mixed).push(set));
+    let html = state.sets.length > 1
+      ? `<option value="${ALL_SETS_ID}" ${state.activeSetId === ALL_SETS_ID ? 'selected' : ''}>Все наборы (${state.sets.reduce((sum, set) => sum + (set.termCount || 0), 0)})</option>`
+      : '';
+    Object.keys(groups).forEach((language) => {
+      if (groups[language].length === 0) return;
+      html += `<optgroup label="${languageLabel(language)}">` + groups[language].map((set) =>
+        `<option value="${escapeHtml(set.id)}" ${set.id === state.activeSetId ? 'selected' : ''}>${escapeHtml(set.name)} (${set.termCount})</option>`
+      ).join('') + '</optgroup>';
+    });
+    el.setSelect.innerHTML = html;
+    el.btnDeleteSet.hidden = state.activeSetId === ALL_SETS_ID;
   }
 
   async function switchActiveSet(setId) {
@@ -159,10 +195,32 @@
   }
 
   async function loadActiveSetTerms() {
-    if (!state.activeSetId) { state.terms = []; state.chunkMap = new Map(); return; }
-    const { terms, chunkMap } = await state.store.loadSetTerms(state.activeSetId);
-    state.terms = terms;
-    state.chunkMap = chunkMap;
+    if (!state.activeSetId) {
+      state.terms = [];
+      state.chunkMap = new Map();
+      state.termMeta = new Map();
+      return;
+    }
+    const selectedSets = state.activeSetId === ALL_SETS_ID
+      ? state.sets
+      : state.sets.filter((set) => set.id === state.activeSetId);
+    const bundles = await Promise.all(selectedSets.map(async (set) => ({
+      set,
+      data: await state.store.loadSetTerms(set.id)
+    })));
+    state.terms = [];
+    state.chunkMap = new Map();
+    state.termMeta = new Map();
+    bundles.forEach(({ set, data }) => {
+      const setLanguage = set.language || inferSetLanguage(data.terms);
+      set.language = setLanguage;
+      data.terms.forEach((term) => {
+        const language = setLanguage === 'mixed' ? detectTermLanguage(term.term) : setLanguage;
+        state.terms.push(term);
+        state.chunkMap.set(term.id, { setId: set.id, chunkIdx: data.chunkMap.get(term.id) });
+        state.termMeta.set(term.id, { setId: set.id, setName: set.name, language });
+      });
+    });
   }
 
   async function refreshSetsList() {
@@ -177,6 +235,7 @@
       : 'Загрузи CSV-файл со словами и фразами на английском или немецком — приложение построит для тебя карточки и расписание повторений.';
     el.btnCancelImport.hidden = mode !== 'add';
     el.setNameInput.value = '';
+    el.setLanguageSelect.value = 'auto';
     el.importErrors.hidden = true;
     el.importErrors.innerHTML = '';
     showScreen('import');
@@ -223,7 +282,9 @@
 
     const name = (el.setNameInput.value || '').trim() || defaultName;
     const terms = items.map((it) => Srs.makeTerm(it));
-    const newId = await state.store.createSet(name, terms);
+    const selectedLanguage = el.setLanguageSelect.value;
+    const language = selectedLanguage === 'auto' ? inferSetLanguage(terms) : selectedLanguage;
+    const newId = await state.store.createSet(name, terms, language);
 
     await refreshSetsList();
     state.activeSetId = newId;
@@ -342,11 +403,47 @@
     // Persist just the one chunk this term lives in, not the whole set —
     // keeps writes small and fast against Telegram CloudStorage's per-key
     // size limit.
-    const chunkIdx = state.chunkMap.get(termId);
-    if (chunkIdx !== undefined && state.activeSetId) {
-      const chunkTerms = state.terms.filter((t) => state.chunkMap.get(t.id) === chunkIdx);
-      await state.store.saveChunk(state.activeSetId, chunkIdx, chunkTerms);
+    const location = state.chunkMap.get(termId);
+    if (location && location.chunkIdx !== undefined) {
+      const chunkTerms = state.terms.filter((candidate) => {
+        const candidateLocation = state.chunkMap.get(candidate.id);
+        return candidateLocation && candidateLocation.setId === location.setId && candidateLocation.chunkIdx === location.chunkIdx;
+      });
+      await state.store.saveChunk(location.setId, location.chunkIdx, chunkTerms);
     }
+  }
+
+  function speakTerm(term) {
+    if (!term || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+      showToast('Озвучивание не поддерживается на этом устройстве');
+      return;
+    }
+    const meta = state.termMeta.get(term.id);
+    const utterance = new SpeechSynthesisUtterance(term.term);
+    utterance.lang = meta && meta.language === 'de' ? 'de-DE' : 'en-US';
+    utterance.rate = 0.9;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function makeSpeakButton(term) {
+    const button = document.createElement('button');
+    button.className = 'speak-btn';
+    button.type = 'button';
+    button.setAttribute('aria-label', 'Озвучить слово');
+    button.title = 'Озвучить слово';
+    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9v6h4l5 4V5L9 9H5Zm12.5-1.5a6 6 0 0 1 0 9m-2-6.8a3 3 0 0 1 0 4.6"/></svg>';
+    button.addEventListener('click', () => speakTerm(term));
+    return button;
+  }
+
+  function appendTermSource(card, term) {
+    const label = termSourceLabel(term);
+    if (!label) return;
+    const source = document.createElement('div');
+    source.className = 'term-source';
+    source.textContent = label;
+    card.appendChild(source);
   }
 
   // ---- Phase 1: Study card -------------------------------------------
@@ -358,11 +455,16 @@
     badge.className = 'phase-badge';
     badge.textContent = 'Изучение';
     card.appendChild(badge);
+    appendTermSource(card, term);
 
+    const termRow = document.createElement('div');
+    termRow.className = 'term-heading-row';
     const t = document.createElement('div');
     t.className = 'study-term';
     t.textContent = term.term;
-    card.appendChild(t);
+    termRow.appendChild(t);
+    termRow.appendChild(makeSpeakButton(term));
+    card.appendChild(termRow);
 
     const tr = document.createElement('div');
     tr.className = 'study-translation';
@@ -409,6 +511,9 @@
     kindEl.textContent = exercise.kindLabel;
     card.appendChild(kindEl);
 
+    const exerciseTerm = exercise.termId ? getTermById(exercise.termId) : null;
+    if (exerciseTerm) appendTermSource(card, exerciseTerm);
+
     if (exercise.kind === 'flashcard') {
       renderFlashcard(card, exercise);
       return;
@@ -420,17 +525,16 @@
     card.appendChild(promptLabel);
 
     if (exercise.prompt) {
+      const promptRow = document.createElement('div');
+      promptRow.className = 'term-heading-row';
       const prompt = document.createElement('div');
       prompt.className = 'exercise-prompt';
       prompt.textContent = exercise.prompt;
-      card.appendChild(prompt);
-    }
-
-    if (exercise.context) {
-      const ctx = document.createElement('div');
-      ctx.className = 'exercise-context';
-      ctx.textContent = '«' + exercise.context + '»';
-      card.appendChild(ctx);
+      promptRow.appendChild(prompt);
+      if (exerciseTerm && exercise.prompt === exerciseTerm.term) {
+        promptRow.appendChild(makeSpeakButton(exerciseTerm));
+      }
+      card.appendChild(promptRow);
     }
 
     const feedback = document.createElement('div');
@@ -459,7 +563,7 @@
       input.autocomplete = 'off';
       input.autocapitalize = 'off';
       input.spellcheck = false;
-      input.placeholder = 'Введите ответ';
+      input.placeholder = 'Введите ответ или оставьте пустым';
       card.appendChild(input);
       card.appendChild(feedback);
       const actions = buildActionsRow();
@@ -521,7 +625,6 @@
 
   function handleTypedAnswer(value, exercise, input, feedback, checkBtn) {
     if (state.session.answered) return;
-    if (!value.trim()) { input.focus(); return; }
     state.session.answered = true;
     const isCorrect = Ex.answersMatch(value, exercise.correctAnswer);
     input.disabled = true;
@@ -612,6 +715,8 @@
       answer.className = 'flash-answer';
       answer.textContent = exercise.answer;
       face.appendChild(answer);
+      const term = getTermById(exercise.termId);
+      if (term) face.appendChild(makeSpeakButton(term));
       showFlashButtons();
     });
 
@@ -729,6 +834,9 @@
 
   function renderReview() {
     const stats = computeStats(state.terms);
+    const availableNow = state.terms.filter((term) => term.attempts > 0);
+    el.btnQuickReview.hidden = state.terms.length === 0;
+    el.btnQuickReview.textContent = `Повторить сейчас · ${Math.min((availableNow.length || state.terms.length), SESSION_SIZE)}`;
     el.reviewStats.innerHTML =
       statTile(stats.total, 'Всего') +
       statTile(stats.new, 'Новые') +
@@ -776,6 +884,7 @@
         <div class="review-item-main">
           <div class="review-item-term">${escapeHtml(t.term)}</div>
           <div class="review-item-tr">${escapeHtml(t.translation)}</div>
+          <div class="term-source">${escapeHtml(termSourceLabel(t))}</div>
         </div>
         ${badgeFor(t)}
       </div>
@@ -786,6 +895,15 @@
       showScreen('learn');
       startLearnSession(ids);
     };
+  }
+
+  function startQuickReview() {
+    const attempted = state.terms.filter((term) => term.attempts > 0);
+    const pool = attempted.length ? attempted : state.terms;
+    const ids = Ex.shuffle(pool).slice(0, SESSION_SIZE).map((term) => term.id);
+    if (ids.length === 0) return;
+    showScreen('learn');
+    startLearnSession(ids);
   }
 
   // ---------------------------------------------------------------------
@@ -822,6 +940,7 @@
             <div class="word-row-term">${escapeHtml(t.term)} <span style="color:var(--ink-soft);font-weight:400;">— ${escapeHtml(t.translation)}</span></div>
             ${badgeFor(t)}
           </div>
+          <div class="term-source">${escapeHtml(termSourceLabel(t))}</div>
           <div class="word-row-details">
             <span>Попыток: ${t.attempts}</span>
             <span>Верно: ${t.correct_count}</span>
@@ -859,6 +978,7 @@
       importTitle: $('#importTitle'),
       importSubtitle: $('#importSubtitle'),
       setNameInput: $('#setNameInput'),
+      setLanguageSelect: $('#setLanguageSelect'),
       fileInput: $('#fileInput'),
       dropzone: $('#dropzone'),
       btnLoadDemo: $('#btnLoadDemo'),
@@ -872,6 +992,7 @@
       btnLearnEmptyToReview: $('#btnLearnEmptyToReview'),
 
       reviewStats: $('#reviewStats'),
+      btnQuickReview: $('#btnQuickReview'),
       reviewTabs: $('#reviewTabs'),
       reviewList: $('#reviewList'),
       btnStartReview: $('#btnStartReview'),
@@ -912,6 +1033,7 @@
     el.setSelect.addEventListener('change', (e) => switchActiveSet(e.target.value));
     el.btnAddSet.addEventListener('click', () => openImportScreen('add'));
     el.btnDeleteSet.addEventListener('click', deleteActiveSet);
+    el.btnQuickReview.addEventListener('click', startQuickReview);
 
     el.reviewTabs.addEventListener('click', (e) => {
       const tab = e.target.closest('.tab');
@@ -925,7 +1047,7 @@
   }
 
   async function deleteActiveSet() {
-    if (!state.activeSetId) return;
+    if (!state.activeSetId || state.activeSetId === ALL_SETS_ID) return;
     const setName = (state.sets.find((s) => s.id === state.activeSetId) || {}).name || 'этот набор';
     const ok = await confirmDialog(`Удалить набор «${setName}» и весь его прогресс?`);
     if (!ok) return;
@@ -988,7 +1110,7 @@
       return;
     }
 
-    if (!state.activeSetId || !state.sets.find((s) => s.id === state.activeSetId)) {
+    if (!state.activeSetId || (state.activeSetId !== ALL_SETS_ID && !state.sets.find((s) => s.id === state.activeSetId))) {
       state.activeSetId = state.sets[0].id;
       try { await state.store.setActiveSetId(state.activeSetId); }
       catch (e) { console.error('Failed to persist active set id:', e); }
