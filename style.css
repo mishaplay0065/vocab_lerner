@@ -65,6 +65,61 @@ body{
 }
 .icon-btn:active{background:var(--surface-alt);}
 
+.topbar-setswitch{
+  flex:1;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-left:10px;
+}
+.set-select{
+  flex:1;
+  min-width:0;
+  border:1px solid var(--border);
+  background:var(--surface);
+  color:var(--ink);
+  border-radius:var(--radius-s);
+  padding:8px 10px;
+  font-family:var(--font-body);
+  font-weight:600;
+  font-size:14px;
+}
+.sync-badge{
+  margin:-8px 18px 4px;
+  font-size:11px;
+  color:var(--ink-soft);
+  display:flex;
+  align-items:center;
+  gap:5px;
+}
+.sync-badge.cloud::before{content:"☁"; }
+.sync-badge.local::before{content:"💾"; }
+
+.screen-loading{
+  flex:1;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:14px;
+  min-height:100vh;
+}
+.loading-spinner{
+  width:34px; height:34px;
+  border:3px solid var(--surface-alt);
+  border-top-color:var(--accent);
+  border-radius:50%;
+  animation:spin .8s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+.field-label{
+  font-size:13px;
+  font-weight:600;
+  color:var(--ink-soft);
+  margin-bottom:-8px;
+}
+
 /* ---------- Screens ---------- */
 .screen{
   flex:1;
@@ -294,6 +349,28 @@ body{
 
 .exercise-actions{display:flex; gap:10px; margin-top:auto;}
 .exercise-actions .btn{flex:1;}
+
+.phase-badge{
+  display:inline-block;
+  font-size:11px;
+  font-weight:700;
+  color:var(--gold);
+  background:var(--gold-soft);
+  padding:3px 9px;
+  border-radius:20px;
+  align-self:flex-start;
+}
+.study-term{
+  font-family:var(--font-display);
+  font-size:30px;
+  font-weight:700;
+  line-height:1.25;
+}
+.study-translation{
+  font-size:18px;
+  color:var(--accent-dark);
+  font-weight:600;
+}
 
 .matching-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
 .match-cell{

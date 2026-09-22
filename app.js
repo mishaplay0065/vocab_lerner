@@ -1,25 +1,28 @@
 /**
  * app.js
  * -----------------------------------------------------------------------
- * Main controller: screens (Import / Learn / Review / Progress), session
- * queue management, rendering and event wiring. Persistence goes through
- * VocabStorage; scheduling math through VocabSrs; exercise data through
- * VocabExercises; CSV parsing through VocabCsv.
+ * Main controller: multi-set vocabulary management, screens (Learn /
+ * Review / Progress / Import), the two-phase Study→Test learning flow,
+ * and rendering. Persistence goes through VocabStorage.VocabStore
+ * (Telegram CloudStorage with a localStorage fallback); scheduling math
+ * through VocabSrs; exercise data through VocabExercises; CSV parsing
+ * through VocabCsv.
+ *
+ * All DOM lookups and event wiring happen inside the DOMContentLoaded
+ * handler at the bottom of this file, so navigation never silently fails
+ * because a listener was attached before its element existed.
  * -----------------------------------------------------------------------
  */
 (function () {
   'use strict';
 
-  const { StorageService } = window.VocabStorage;
   const Srs = window.VocabSrs;
   const Ex = window.VocabExercises;
   const Csv = window.VocabCsv;
 
-  const storage = StorageService.create();
-
   // Embedded fallback demo set so the "Загрузить демо-набор" button works
   // even when the app is opened straight from disk (file://), where
-  // fetching data/sample.csv would be blocked by the browser.
+  // fetching an external sample.csv would be blocked by the browser.
   const DEMO_CSV = [
     'term;translation;context',
     'achieve;достигать;She worked hard to achieve her goals.',
@@ -34,62 +37,32 @@
     'to overwhelm;переполнять, ошеломлять;The amount of work overwhelmed her.'
   ].join('\n');
 
+  const SESSION_SIZE = 10;
+
   // ---------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------
   const state = {
-    terms: [],
+    store: null,
+    sets: [],                 // [{id, name, createdAt, termCount, chunkCount}]
+    activeSetId: null,
+    terms: [],                 // terms of the active set
+    chunkMap: new Map(),  // termId -> chunk index, for cheap partial saves
     settings: null,
-    screen: 'import',      // import | learn | review | progress
+    screen: 'loading',       // loading | import | learn | review | progress
+    importMode: 'first',    // 'first' (no sets yet) | 'add' (adding another set)
     session: {
-      queue: [],            // array of term ids
+      queue: [],
       initialLength: 0,
-      current: null,         // current exercise payload
       answered: false,
-      matchingState: null
+      pendingStudyTermId: null // set while Phase 1 (study) is showing, before Phase 2 test
     },
     reviewFilter: 'due'
   };
 
-  // ---------------------------------------------------------------------
-  // DOM refs
-  // ---------------------------------------------------------------------
+  let el = {}; // populated on DOMContentLoaded
   const $ = (sel) => document.querySelector(sel);
-  const el = {
-    topbarTitle: $('#topbarTitle'),
-    btnReset: $('#btnReset'),
-    screens: {
-      import: $('#screen-import'),
-      learn: $('#screen-learn'),
-      review: $('#screen-review'),
-      progress: $('#screen-progress')
-    },
-    bottomnav: $('#bottomnav'),
-    fileInput: $('#fileInput'),
-    dropzone: $('#dropzone'),
-    btnLoadDemo: $('#btnLoadDemo'),
-    importErrors: $('#importErrors'),
-
-    learnProgressFill: $('#learnProgressFill'),
-    learnCounter: $('#learnCounter'),
-    exerciseCard: $('#exerciseCard'),
-    learnEmpty: $('#learnEmpty'),
-    btnLearnEmptyToReview: $('#btnLearnEmptyToReview'),
-
-    reviewStats: $('#reviewStats'),
-    reviewTabs: $('#reviewTabs'),
-    reviewList: $('#reviewList'),
-    btnStartReview: $('#btnStartReview'),
-
-    progressStats: $('#progressStats'),
-    progressBarFill: $('#progressBarFill'),
-    progressBarLabel: $('#progressBarLabel'),
-    wordTable: $('#wordTable'),
-
-    toast: $('#toast')
-  };
-
-  const SCREEN_TITLES = { learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Карточки' };
+  const SCREEN_TITLES = { learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Карточки', loading: 'Карточки' };
 
   // ---------------------------------------------------------------------
   // Telegram WebApp integration
@@ -123,14 +96,25 @@
     toastTimer = setTimeout(() => { el.toast.hidden = true; }, ms || 2200);
   }
 
+  function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
   // ---------------------------------------------------------------------
   // Screen navigation
   // ---------------------------------------------------------------------
   function showScreen(name) {
     state.screen = name;
     Object.keys(el.screens).forEach((key) => { el.screens[key].hidden = key !== name; });
+    el.mainHeader.hidden = name === 'loading';
+    el.topbarTitle.hidden = name !== 'import';
     el.topbarTitle.textContent = SCREEN_TITLES[name];
-    el.bottomnav.hidden = name === 'import';
+    el.setSwitch.hidden = name === 'loading' || name === 'import' || state.sets.length === 0;
+    el.bottomnav.hidden = name === 'loading' || name === 'import';
+    el.syncBadge.hidden = name === 'loading';
+
     document.querySelectorAll('.nav-btn').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.screen === name);
     });
@@ -140,12 +124,51 @@
     if (name === 'progress') renderProgress();
   }
 
-  document.querySelectorAll('.nav-btn').forEach((btn) => {
-    btn.addEventListener('click', () => showScreen(btn.dataset.screen));
-  });
+  // ---------------------------------------------------------------------
+  // Set switcher (header dropdown + add/delete)
+  // ---------------------------------------------------------------------
+  function renderSetSwitcher() {
+    el.setSelect.innerHTML = state.sets.map((s) =>
+      `<option value="${escapeHtml(s.id)}" ${s.id === state.activeSetId ? 'selected' : ''}>${escapeHtml(s.name)} (${s.termCount})</option>`
+    ).join('');
+  }
+
+  async function switchActiveSet(setId) {
+    state.activeSetId = setId;
+    await state.store.setActiveSetId(setId);
+    await loadActiveSetTerms();
+    renderSetSwitcher();
+    if (state.screen === 'learn' || state.screen === 'review' || state.screen === 'progress') {
+      showScreen(state.screen);
+    }
+  }
+
+  async function loadActiveSetTerms() {
+    if (!state.activeSetId) { state.terms = []; state.chunkMap = new Map(); return; }
+    const { terms, chunkMap } = await state.store.loadSetTerms(state.activeSetId);
+    state.terms = terms;
+    state.chunkMap = chunkMap;
+  }
+
+  async function refreshSetsList() {
+    state.sets = await state.store.listSets();
+  }
+
+  function openImportScreen(mode) {
+    state.importMode = mode;
+    el.importTitle.textContent = mode === 'add' ? 'Новый набор слов' : 'Свой словарь — своими карточками';
+    el.importSubtitle.textContent = mode === 'add'
+      ? 'Загрузи CSV-файл для ещё одного набора — он появится в списке рядом с остальными.'
+      : 'Загрузи CSV-файл со словами и фразами на английском или немецком — приложение построит для тебя карточки и расписание повторений.';
+    el.btnCancelImport.hidden = mode !== 'add';
+    el.setNameInput.value = '';
+    el.importErrors.hidden = true;
+    el.importErrors.innerHTML = '';
+    showScreen('import');
+  }
 
   // ---------------------------------------------------------------------
-  // Import flow
+  // Import flow (creates a new set; never overwrites existing ones)
   // ---------------------------------------------------------------------
   function readFileAsText(file) {
     return new Promise((resolve, reject) => {
@@ -174,48 +197,27 @@
     el.importErrors.innerHTML = html;
   }
 
-  function escapeHtml(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
+  function baseName(fileName) {
+    return (fileName || '').replace(/\.[^/.]+$/, '') || 'Мой набор';
   }
 
-  async function handleCsvText(text, sourceName) {
+  async function handleCsvText(text, defaultName) {
     const { items, errors, warnings } = Csv.parseCsv(text);
     renderImportErrors(errors, warnings);
     if (errors.length || items.length === 0) return;
 
+    const name = (el.setNameInput.value || '').trim() || defaultName;
     const terms = items.map((it) => Srs.makeTerm(it));
-    state.terms = terms;
-    await storage.setTerms(terms);
-    await storage.setMeta({ importedAt: Date.now(), sourceFileName: sourceName || 'demo', count: terms.length });
-    showToast(`Загружено слов: ${terms.length}`);
+    const newId = await state.store.createSet(name, terms);
+
+    await refreshSetsList();
+    state.activeSetId = newId;
+    await loadActiveSetTerms();
+    renderSetSwitcher();
+
+    showToast(`Набор «${name}» создан: ${terms.length} слов`);
     showScreen('learn');
   }
-
-  el.fileInput.addEventListener('change', async (ev) => {
-    const file = ev.target.files && ev.target.files[0];
-    if (!file) return;
-    try {
-      const text = await readFileAsText(file);
-      await handleCsvText(text, file.name);
-    } catch (e) {
-      renderImportErrors(['Не удалось прочитать файл. Попробуйте ещё раз.'], []);
-    } finally {
-      el.fileInput.value = '';
-    }
-  });
-
-  el.btnLoadDemo.addEventListener('click', () => handleCsvText(DEMO_CSV, 'demo.csv'));
-
-  el.btnReset.addEventListener('click', async () => {
-    const ok = await confirmDialog('Удалить текущий список слов и загрузить новый? Прогресс будет потерян.');
-    if (!ok) return;
-    await storage.clearAll();
-    state.terms = [];
-    el.importErrors.hidden = true;
-    showScreen('import');
-  });
 
   // ---------------------------------------------------------------------
   // Stats helpers
@@ -240,14 +242,14 @@
   // ---------------------------------------------------------------------
   // Learn session
   // ---------------------------------------------------------------------
-  const SESSION_SIZE = 10;
-
   function buildLearnQueue(terms) {
     const now = Date.now();
     const due = terms.filter((t) => t.status !== 'new' && Srs.isDue(t, now))
       .sort((a, b) => a.due_date - b.due_date);
     const fresh = terms.filter((t) => t.status === 'new')
       .sort((a, b) => a.created_at - b.created_at);
+    // Due reviews first, but always include fresh words too so a brand-new
+    // set (all "new", nothing "due" yet) is never shown as empty.
     return [...due, ...fresh].slice(0, SESSION_SIZE).map((t) => t.id);
   }
 
@@ -258,7 +260,7 @@
     state.session.queue = queue;
     state.session.initialLength = Math.max(queue.length, 1);
     state.session.answered = false;
-    state.session.matchingState = null;
+    state.session.pendingStudyTermId = null;
     renderLearnStep();
   }
 
@@ -282,19 +284,32 @@
     el.exerciseCard.hidden = false;
     el.learnEmpty.hidden = true;
 
-    // Occasionally offer the bonus "matching" round when enough items remain.
-    if (state.session.queue.length >= 4 && Math.random() < 0.2) {
-      const ids = state.session.queue.slice(0, 4);
-      const terms = ids.map(getTermById);
-      renderMatching(terms);
+    const termId = state.session.queue[0];
+    const term = getTermById(termId);
+    if (!term) { // stale id (e.g. set switched mid-session) - just drop it
+      state.session.queue.shift();
+      renderLearnStep();
       return;
     }
 
-    const termId = state.session.queue[0];
-    const term = getTermById(termId);
-    const exercise = Ex.pickExerciseType(term, state.terms);
-    state.session.current = exercise;
+    // Phase 1: never-attempted words get a Study card before any test.
+    if (term.attempts === 0) {
+      state.session.answered = false;
+      renderStudyCard(term);
+      return;
+    }
+
+    // Bonus "find the pair" round — only among words already past Study,
+    // so it never collides with the Study->Test flow of brand-new words.
+    const frontIds = state.session.queue.slice(0, 4);
+    const frontTerms = frontIds.map(getTermById).filter(Boolean);
+    if (frontTerms.length === 4 && frontTerms.every((t) => t.attempts > 0) && Math.random() < 0.2) {
+      renderMatching(frontTerms);
+      return;
+    }
+
     state.session.answered = false;
+    const exercise = Ex.pickExerciseType(term, state.terms);
     renderExercise(exercise);
   }
 
@@ -306,10 +321,70 @@
 
   async function scoreTerm(termId, isCorrect) {
     const term = getTermById(termId);
+    if (!term) return;
     Srs.applyAnswer(term, isCorrect, state.settings.intervalsDays);
-    await storage.setTerms(state.terms);
+
+    // Persist just the one chunk this term lives in, not the whole set —
+    // keeps writes small and fast against Telegram CloudStorage's per-key
+    // size limit.
+    const chunkIdx = state.chunkMap.get(termId);
+    if (chunkIdx !== undefined && state.activeSetId) {
+      const chunkTerms = state.terms.filter((t) => state.chunkMap.get(t.id) === chunkIdx);
+      await state.store.saveChunk(state.activeSetId, chunkIdx, chunkTerms);
+    }
   }
 
+  // ---- Phase 1: Study card -------------------------------------------
+  function renderStudyCard(term) {
+    const card = el.exerciseCard;
+    card.innerHTML = '';
+
+    const badge = document.createElement('div');
+    badge.className = 'phase-badge';
+    badge.textContent = 'Изучение';
+    card.appendChild(badge);
+
+    const t = document.createElement('div');
+    t.className = 'study-term';
+    t.textContent = term.term;
+    card.appendChild(t);
+
+    const tr = document.createElement('div');
+    tr.className = 'study-translation';
+    tr.textContent = term.translation;
+    card.appendChild(tr);
+
+    if (term.context) {
+      const ctx = document.createElement('div');
+      ctx.className = 'exercise-context';
+      ctx.textContent = '«' + term.context + '»';
+      card.appendChild(ctx);
+    }
+
+    const spacer = document.createElement('div');
+    spacer.style.flex = '1';
+    card.appendChild(spacer);
+
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-primary';
+    btn.textContent = 'Я запомнил';
+    btn.addEventListener('click', () => renderPhase2Test(term));
+    card.appendChild(btn);
+  }
+
+  // ---- Phase 2: immediate test on the same word -----------------------
+  function renderPhase2Test(term) {
+    const canMultipleChoice = state.terms.filter((t) => t.id !== term.id).length >= 3;
+    const type = canMultipleChoice && Math.random() < 0.5 ? 'multiple_choice' : 'type_answer';
+    const exercise = type === 'multiple_choice'
+      ? Ex.buildMultipleChoice(term, state.terms)
+      : Ex.buildTypeAnswer(term);
+    exercise.kindLabel = 'Проверка';
+    state.session.answered = false;
+    renderExercise(exercise);
+  }
+
+  // ---- Generic exercise rendering (multiple choice / type / spelling / flashcard) ----
   function renderExercise(exercise) {
     const card = el.exerciseCard;
     card.innerHTML = '';
@@ -346,7 +421,6 @@
     const feedback = document.createElement('div');
     feedback.className = 'feedback';
     feedback.hidden = true;
-    feedback.id = 'feedbackBox';
 
     if (exercise.kind === 'multiple_choice') {
       const grid = document.createElement('div');
@@ -570,12 +644,6 @@
     grid.className = 'matching-grid';
     card.appendChild(grid);
 
-    const leftCol = document.createElement('div');
-    const rightCol = document.createElement('div');
-    grid.style.display = 'grid';
-    grid.style.gridTemplateColumns = '1fr 1fr';
-    grid.style.gap = '8px';
-
     let selectedLeft = null;
     let selectedRight = null;
     let solvedIds = new Set();
@@ -637,8 +705,6 @@
     }
   }
 
-  el.btnLearnEmptyToReview.addEventListener('click', () => showScreen('review'));
-
   // ---------------------------------------------------------------------
   // Review screen
   // ---------------------------------------------------------------------
@@ -658,14 +724,6 @@
 
     renderReviewList();
   }
-
-  el.reviewTabs.addEventListener('click', (e) => {
-    const tab = e.target.closest('.tab');
-    if (!tab) return;
-    state.reviewFilter = tab.dataset.filter;
-    document.querySelectorAll('#reviewTabs .tab').forEach((t) => t.classList.toggle('active', t === tab));
-    renderReviewList();
-  });
 
   function filteredReviewTerms() {
     const now = Date.now();
@@ -761,19 +819,139 @@
   }
 
   // ---------------------------------------------------------------------
-  // Boot
+  // Boot + event wiring (deferred to DOMContentLoaded so every element
+  // referenced below is guaranteed to exist first)
   // ---------------------------------------------------------------------
-  async function boot() {
-    initTelegram();
-    state.settings = await storage.getSettings();
-    const terms = await storage.getTerms();
-    state.terms = terms || [];
-    if (state.terms.length > 0) {
-      showScreen('learn');
-    } else {
-      showScreen('import');
-    }
+  function cacheDom() {
+    el = {
+      mainHeader: $('#mainHeader'),
+      topbarTitle: $('#topbarTitle'),
+      setSwitch: $('#setSwitch'),
+      setSelect: $('#setSelect'),
+      btnAddSet: $('#btnAddSet'),
+      btnDeleteSet: $('#btnDeleteSet'),
+      syncBadge: $('#syncBadge'),
+
+      screens: {
+        loading: $('#screen-loading'),
+        import: $('#screen-import'),
+        learn: $('#screen-learn'),
+        review: $('#screen-review'),
+        progress: $('#screen-progress')
+      },
+      bottomnav: $('#bottomnav'),
+
+      importTitle: $('#importTitle'),
+      importSubtitle: $('#importSubtitle'),
+      setNameInput: $('#setNameInput'),
+      fileInput: $('#fileInput'),
+      dropzone: $('#dropzone'),
+      btnLoadDemo: $('#btnLoadDemo'),
+      btnCancelImport: $('#btnCancelImport'),
+      importErrors: $('#importErrors'),
+
+      learnProgressFill: $('#learnProgressFill'),
+      learnCounter: $('#learnCounter'),
+      exerciseCard: $('#exerciseCard'),
+      learnEmpty: $('#learnEmpty'),
+      btnLearnEmptyToReview: $('#btnLearnEmptyToReview'),
+
+      reviewStats: $('#reviewStats'),
+      reviewTabs: $('#reviewTabs'),
+      reviewList: $('#reviewList'),
+      btnStartReview: $('#btnStartReview'),
+
+      progressStats: $('#progressStats'),
+      progressBarFill: $('#progressBarFill'),
+      progressBarLabel: $('#progressBarLabel'),
+      wordTable: $('#wordTable'),
+
+      toast: $('#toast')
+    };
   }
 
-  boot();
+  function wireEvents() {
+    document.querySelectorAll('.nav-btn').forEach((btn) => {
+      btn.addEventListener('click', () => showScreen(btn.dataset.screen));
+    });
+
+    el.fileInput.addEventListener('change', async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      try {
+        const text = await readFileAsText(file);
+        await handleCsvText(text, baseName(file.name));
+      } catch (e) {
+        renderImportErrors(['Не удалось прочитать файл. Попробуйте ещё раз.'], []);
+      } finally {
+        el.fileInput.value = '';
+      }
+    });
+
+    el.btnLoadDemo.addEventListener('click', () => handleCsvText(DEMO_CSV, 'Демо-набор'));
+
+    el.btnCancelImport.addEventListener('click', () => {
+      showScreen(state.terms.length ? 'learn' : 'import');
+    });
+
+    el.setSelect.addEventListener('change', (e) => switchActiveSet(e.target.value));
+    el.btnAddSet.addEventListener('click', () => openImportScreen('add'));
+    el.btnDeleteSet.addEventListener('click', deleteActiveSet);
+
+    el.reviewTabs.addEventListener('click', (e) => {
+      const tab = e.target.closest('.tab');
+      if (!tab) return;
+      state.reviewFilter = tab.dataset.filter;
+      document.querySelectorAll('#reviewTabs .tab').forEach((t) => t.classList.toggle('active', t === tab));
+      renderReviewList();
+    });
+
+    el.btnLearnEmptyToReview.addEventListener('click', () => showScreen('review'));
+  }
+
+  async function deleteActiveSet() {
+    if (!state.activeSetId) return;
+    const setName = (state.sets.find((s) => s.id === state.activeSetId) || {}).name || 'этот набор';
+    const ok = await confirmDialog(`Удалить набор «${setName}» и весь его прогресс?`);
+    if (!ok) return;
+    await state.store.deleteSet(state.activeSetId);
+    await refreshSetsList();
+    state.activeSetId = await state.store.getActiveSetId();
+    await loadActiveSetTerms();
+    renderSetSwitcher();
+    if (state.sets.length === 0) openImportScreen('first');
+    else showScreen('learn');
+  }
+
+  async function boot() {
+    cacheDom();
+    wireEvents();
+    initTelegram();
+
+    state.store = await window.VocabStorage.VocabStore.create();
+    el.syncBadge.hidden = false;
+    el.syncBadge.className = 'sync-badge ' + state.store.backendName;
+    el.syncBadge.textContent = state.store.backendName === 'cloud'
+      ? 'Синхронизировано с Telegram'
+      : 'Локальный режим (без Telegram) — прогресс останется в этом браузере';
+
+    state.settings = await state.store.getSettings();
+    await refreshSetsList();
+
+    if (state.sets.length === 0) {
+      openImportScreen('first');
+      return;
+    }
+
+    state.activeSetId = await state.store.getActiveSetId();
+    if (!state.activeSetId || !state.sets.find((s) => s.id === state.activeSetId)) {
+      state.activeSetId = state.sets[0].id;
+      await state.store.setActiveSetId(state.activeSetId);
+    }
+    await loadActiveSetTerms();
+    renderSetSwitcher();
+    showScreen('learn');
+  }
+
+  document.addEventListener('DOMContentLoaded', boot);
 })();

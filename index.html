@@ -5,25 +5,40 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>Карточки — учи слова</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 
 <div id="app">
 
+  <!-- ===================== LOADING SCREEN ===================== -->
+  <section class="screen screen-loading" id="screen-loading">
+    <div class="loading-spinner" aria-hidden="true"></div>
+    <p class="muted">Загрузка словаря…</p>
+  </section>
+
   <!-- Top bar -->
-  <header class="topbar">
+  <header class="topbar" id="mainHeader" hidden>
     <div class="topbar-title" id="topbarTitle">Карточки</div>
-    <button class="icon-btn" id="btnReset" title="Загрузить новый список">⟳</button>
+
+    <div class="topbar-setswitch" id="setSwitch" hidden>
+      <select id="setSelect" class="set-select" aria-label="Выбрать набор слов"></select>
+      <button class="icon-btn" id="btnAddSet" title="Добавить новый набор">＋</button>
+      <button class="icon-btn" id="btnDeleteSet" title="Удалить текущий набор">🗑</button>
+    </div>
   </header>
+  <div class="sync-badge" id="syncBadge" hidden></div>
 
   <!-- ===================== EMPTY / IMPORT SCREEN ===================== -->
-  <section class="screen" id="screen-import">
+  <section class="screen" id="screen-import" hidden>
     <div class="import-hero">
       <div class="hero-mark" aria-hidden="true">Aa</div>
-      <h1>Свой словарь — своими карточками</h1>
-      <p class="muted">Загрузи CSV-файл со словами и фразами на английском или немецком — приложение построит для тебя карточки и расписание повторений.</p>
+      <h1 id="importTitle">Свой словарь — своими карточками</h1>
+      <p class="muted" id="importSubtitle">Загрузи CSV-файл со словами и фразами на английском или немецком — приложение построит для тебя карточки и расписание повторений.</p>
     </div>
+
+    <label class="field-label" for="setNameInput">Название набора</label>
+    <input type="text" id="setNameInput" class="text-input" placeholder="Например: English A1" maxlength="60">
 
     <label class="dropzone" id="dropzone" for="fileInput">
       <div class="dropzone-icon">＋</div>
@@ -32,7 +47,8 @@
       <input type="file" id="fileInput" accept=".csv,text/csv" hidden>
     </label>
 
-    <button class="btn btn-ghost" id="btnLoadDemo">Загрузить демо-набор (8 слов)</button>
+    <button class="btn btn-ghost" id="btnLoadDemo">Загрузить демо-набор (10 слов)</button>
+    <button class="btn btn-ghost" id="btnCancelImport" hidden>Отмена</button>
 
     <div class="import-errors" id="importErrors" hidden></div>
 
@@ -108,10 +124,10 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="storage.js"></script>
-<script src="csv.js"></script>
-<script src="srs.js"></script>
-<script src="exercises.js"></script>
-<script src="app.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/csv.js"></script>
+<script src="js/srs.js"></script>
+<script src="js/exercises.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>
