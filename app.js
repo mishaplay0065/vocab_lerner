@@ -437,6 +437,31 @@
     return button;
   }
 
+  function makePronunciationActions(term) {
+    const actions = document.createElement('div');
+    actions.className = 'pronunciation-actions';
+    actions.appendChild(makeSpeakButton(term));
+
+    const meta = state.termMeta.get(term.id);
+    if (!meta || meta.language === 'en') {
+      const slug = term.term
+        .toLowerCase()
+        .trim()
+        .replace(/[’']/g, '')
+        .replace(/\s+/g, '-');
+      const link = document.createElement('a');
+      link.className = 'speak-btn cambridge-btn';
+      link.href = `https://dictionary.cambridge.org/pronunciation/english/${encodeURIComponent(slug)}`;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.setAttribute('aria-label', 'Открыть произношение в Cambridge Dictionary');
+      link.title = 'Произношение Cambridge: UK и US';
+      link.textContent = 'C';
+      actions.appendChild(link);
+    }
+    return actions;
+  }
+
   function appendTermSource(card, term) {
     const label = termSourceLabel(term);
     if (!label) return;
@@ -463,7 +488,7 @@
     t.className = 'study-term';
     t.textContent = term.term;
     termRow.appendChild(t);
-    termRow.appendChild(makeSpeakButton(term));
+    termRow.appendChild(makePronunciationActions(term));
     card.appendChild(termRow);
 
     const tr = document.createElement('div');
@@ -532,7 +557,7 @@
       prompt.textContent = exercise.prompt;
       promptRow.appendChild(prompt);
       if (exerciseTerm && exercise.prompt === exerciseTerm.term) {
-        promptRow.appendChild(makeSpeakButton(exerciseTerm));
+        promptRow.appendChild(makePronunciationActions(exerciseTerm));
       }
       card.appendChild(promptRow);
     }
