@@ -923,11 +923,18 @@
     else showScreen('learn');
   }
 
-  async function boot() {
-    cacheDom();
-    wireEvents();
-    initTelegram();
+  aasync function boot() {
+  cacheDom();
+  wireEvents();
+  initTelegram();
 
+  const INIT_TIMEOUT_MS = 2000;
+
+  // The actual storage bootstrap (store creation + settings + sets list
+  // + active set id). Wrapped in its own function so it can be raced
+  // against a timeout below — a stuck CloudStorage callback must never
+  // be able to leave the loading screen up forever.
+  async function loadStorage() {
     state.store = await window.VocabStorage.VocabStore.create();
     el.syncBadge.hidden = false;
     el.syncBadge.className = 'sync-badge ' + state.store.backendName;
@@ -937,21 +944,56 @@
 
     state.settings = await state.store.getSettings();
     await refreshSetsList();
-
-    if (state.sets.length === 0) {
-      openImportScreen('first');
-      return;
-    }
-
     state.activeSetId = await state.store.getActiveSetId();
-    if (!state.activeSetId || !state.sets.find((s) => s.id === state.activeSetId)) {
-      state.activeSetId = state.sets[0].id;
-      await state.store.setActiveSetId(state.activeSetId);
-    }
-    await loadActiveSetTerms();
-    renderSetSwitcher();
-    showScreen('learn');
   }
 
+  let timedOut = false;
+  try {
+    const timeoutPromise = new Promise((resolve) => {
+      setTimeout(() => { timedOut = true; resolve('timeout'); }, INIT_TIMEOUT_MS);
+    });
+    const outcome = await Promise.race([loadStorage().then(() => 'done'), timeoutPromise]);
+    if (outcome === 'timeout') {
+      console.warn('Storage init exceeded', INIT_TIMEOUT_MS, 'ms — proceeding without waiting further.');
+    }
+  } catch (e) {
+    console.error('Storage init failed:', e);
+  }
+
+  console.log('Storage loaded:', state.sets);
+  console.log('Active set:', state.activeSetId);
+
+  // Nothing usable yet (no sets, a still-empty result because we timed
+  // out, or an error above) — go straight to the import screen instead
+  // of leaving the loading screen up.
+  const totalWords = state.sets.reduce((sum, s) => sum + (s.termCount || 0), 0);
+  if (!state.store || state.sets.length === 0 || totalWords === 0) {
+    if (timedOut) console.warn('Proceeding to import screen after timeout with no confirmed sets.');
+    openImportScreen('first');
+    return;
+  }
+
+  if (!state.activeSetId || !state.sets.find((s) => s.id === state.activeSetId)) {
+    state.activeSetId = state.sets[0].id;
+    try { await state.store.setActiveSetId(state.activeSetId); }
+    catch (e) { console.error('Failed to persist active set id:', e); }
+  }
+
+  try {
+    await loadActiveSetTerms();
+  } catch (e) {
+    console.error('Failed to load active set terms:', e);
+  }
+
+  // Defensive fallback: sets existed but this particular set somehow has
+  // no terms — still don't get stuck, send the user to add words.
+  if (state.terms.length === 0) {
+    openImportScreen('add');
+    return;
+  }
+
+  renderSetSwitcher();
+  showScreen('learn');
+}
   document.addEventListener('DOMContentLoaded', boot);
 })();
