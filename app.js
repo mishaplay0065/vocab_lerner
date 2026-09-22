@@ -1,4 +1,3 @@
-```javascript
 /**
  * app.js
  * -----------------------------------------------------------------------
@@ -63,18 +62,20 @@
 
   let el = {}; // populated on DOMContentLoaded
   const $ = (sel) => document.querySelector(sel);
-  const SCREEN_TITLES = { learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Карточки', loading: 'Карточки' };
+  const SCREEN_TITLES = { learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Vocab', loading: 'Vocab' };
 
   // ---------------------------------------------------------------------
   // Telegram WebApp integration
   // ---------------------------------------------------------------------
   function initTelegram() {
     const tg = window.Telegram && window.Telegram.WebApp;
-    if (!tg) return;
+    if (!tg || !tg.initData) return;
     try {
       tg.ready();
       tg.expand();
-      if (tg.setHeaderColor) tg.setHeaderColor('secondary_bg_color');
+      if (tg.setHeaderColor && tg.isVersionAtLeast && tg.isVersionAtLeast('6.1')) {
+        tg.setHeaderColor('secondary_bg_color');
+      }
     } catch (e) { /* not fatal outside Telegram */ }
   }
 
@@ -109,6 +110,7 @@
   function showScreen(name) {
     console.log('renderScreen:', name);
     state.screen = name;
+    window.scrollTo(0, 0);
 
     // Explicit, unconditional: whatever screen we're going to, every other
     // screen — loading included — is hidden. This is what guarantees the
@@ -169,7 +171,7 @@
 
   function openImportScreen(mode) {
     state.importMode = mode;
-    el.importTitle.textContent = mode === 'add' ? 'Новый набор слов' : 'Свой словарь — своими карточками';
+    el.importTitle.textContent = mode === 'add' ? 'Новый набор слов' : 'Учить слова стало проще';
     el.importSubtitle.textContent = mode === 'add'
       ? 'Загрузи CSV-файл для ещё одного набора — он появится в списке рядом с остальными.'
       : 'Загрузи CSV-файл со словами и фразами на английском или немецком — приложение построит для тебя карточки и расписание повторений.';
@@ -1011,4 +1013,3 @@
 
   document.addEventListener('DOMContentLoaded', boot);
 })();
-```

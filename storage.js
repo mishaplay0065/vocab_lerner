@@ -121,7 +121,10 @@
     try {
       const tg = global.Telegram && global.Telegram.WebApp;
       const cs = tg && tg.CloudStorage;
-      if (cs && typeof cs.setItem === 'function' && typeof cs.getItem === 'function') {
+      const isTelegramContext = Boolean(tg && tg.initData);
+      const supportsCloudStorage = Boolean(tg && typeof tg.isVersionAtLeast === 'function' && tg.isVersionAtLeast('6.9'));
+      if (isTelegramContext && supportsCloudStorage && cs &&
+          typeof cs.setItem === 'function' && typeof cs.getItem === 'function') {
         return new CloudStorageBackend(cs);
       }
     } catch (e) { /* fall through to localStorage */ }

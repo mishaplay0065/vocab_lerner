@@ -3,9 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<title>Карточки — учи слова</title>
+<meta name="theme-color" content="#f6f7fb">
+<title>Vocab — учи слова</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%234255ff'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-family='Arial' font-size='34' font-weight='700' fill='white'%3EV%3C/text%3E%3C/svg%3E">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
 
@@ -19,12 +21,12 @@
 
   <!-- Top bar -->
   <header class="topbar" id="mainHeader" hidden>
-    <div class="topbar-title" id="topbarTitle">Карточки</div>
+    <div class="topbar-title" id="topbarTitle">Vocab</div>
 
     <div class="topbar-setswitch" id="setSwitch" hidden>
       <select id="setSelect" class="set-select" aria-label="Выбрать набор слов"></select>
-      <button class="icon-btn" id="btnAddSet" title="Добавить новый набор">＋</button>
-      <button class="icon-btn" id="btnDeleteSet" title="Удалить текущий набор">🗑</button>
+      <button class="icon-btn" id="btnAddSet" title="Добавить новый набор" aria-label="Добавить новый набор"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+      <button class="icon-btn" id="btnDeleteSet" title="Удалить текущий набор" aria-label="Удалить текущий набор"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></svg></button>
     </div>
   </header>
   <div class="sync-badge" id="syncBadge" hidden></div>
@@ -33,7 +35,8 @@
   <section class="screen" id="screen-import" hidden>
     <div class="import-hero">
       <div class="hero-mark" aria-hidden="true">Aa</div>
-      <h1 id="importTitle">Свой словарь — своими карточками</h1>
+      <div class="eyebrow">Персональный тренажёр слов</div>
+      <h1 id="importTitle">Учить слова стало проще</h1>
       <p class="muted" id="importSubtitle">Загрузи CSV-файл со словами и фразами на английском или немецком — приложение построит для тебя карточки и расписание повторений.</p>
     </div>
 
@@ -110,13 +113,13 @@
   <!-- ===================== BOTTOM NAV ===================== -->
   <nav class="bottomnav" id="bottomnav" hidden>
     <button class="nav-btn active" data-screen="learn">
-      <span class="nav-icon">📖</span><span>Учить</span>
+      <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5v-16ZM20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5v-16Z"/></svg></span><span>Учить</span>
     </button>
     <button class="nav-btn" data-screen="review">
-      <span class="nav-icon">🔁</span><span>Повторение</span>
+      <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6.1 8.1A7 7 0 0 1 18.7 7L20 12M4 12l1.3 5A7 7 0 0 0 17.9 15.9"/></svg></span><span>Повторение</span>
     </button>
     <button class="nav-btn" data-screen="progress">
-      <span class="nav-icon">📊</span><span>Прогресс</span>
+      <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 20V10h4v10H5Zm6 0V4h4v16h-4Zm6 0v-7h4v7h-4Z"/></svg></span><span>Прогресс</span>
     </button>
   </nav>
 
@@ -124,10 +127,10 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="js/storage.js"></script>
-<script src="js/csv.js"></script>
-<script src="js/srs.js"></script>
-<script src="js/exercises.js"></script>
-<script src="js/app.js"></script>
+<script src="storage.js"></script>
+<script src="csv.js"></script>
+<script src="srs.js"></script>
+<script src="exercises.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
