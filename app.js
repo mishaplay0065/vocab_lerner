@@ -106,23 +106,35 @@
   // Screen navigation
   // ---------------------------------------------------------------------
   function showScreen(name) {
-    state.screen = name;
-    Object.keys(el.screens).forEach((key) => { el.screens[key].hidden = key !== name; });
-    el.mainHeader.hidden = name === 'loading';
-    el.topbarTitle.hidden = name !== 'import';
-    el.topbarTitle.textContent = SCREEN_TITLES[name];
-    el.setSwitch.hidden = name === 'loading' || name === 'import' || state.sets.length === 0;
-    el.bottomnav.hidden = name === 'loading' || name === 'import';
-    el.syncBadge.hidden = name === 'loading';
+  console.log('renderScreen:', name);
+  state.screen = name;
 
-    document.querySelectorAll('.nav-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.screen === name);
-    });
+  // Explicit, unconditional: whatever screen we're going to, every other
+  // screen — loading included — is hidden. This is what guarantees the
+  // loading screen can never stay on top of another screen.
+  Object.keys(el.screens).forEach((key) => {
+    el.screens[key].hidden = key !== name;
+  });
+  // Belt-and-braces in case a new screen is ever added to the DOM but
+  // forgotten in el.screens: loading is never allowed to stay visible
+  // once we've decided to render anything else.
+  if (name !== 'loading' && el.screens.loading) el.screens.loading.hidden = true;
 
-    if (name === 'learn') startLearnSession();
-    if (name === 'review') renderReview();
-    if (name === 'progress') renderProgress();
-  }
+  el.mainHeader.hidden = name === 'loading';
+  el.topbarTitle.hidden = name !== 'import';
+  el.topbarTitle.textContent = SCREEN_TITLES[name];
+  el.setSwitch.hidden = name === 'loading' || name === 'import' || state.sets.length === 0;
+  el.bottomnav.hidden = name === 'loading' || name === 'import';
+  el.syncBadge.hidden = name === 'loading';
+
+  document.querySelectorAll('.nav-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.screen === name);
+  });
+
+  if (name === 'learn') startLearnSession();
+  if (name === 'review') renderReview();
+  if (name === 'progress') renderProgress();
+}
 
   // ---------------------------------------------------------------------
   // Set switcher (header dropdown + add/delete)
