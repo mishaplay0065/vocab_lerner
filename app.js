@@ -1,3 +1,4 @@
+```javascript
 /**
  * app.js
  * -----------------------------------------------------------------------
@@ -106,35 +107,35 @@
   // Screen navigation
   // ---------------------------------------------------------------------
   function showScreen(name) {
-  console.log('renderScreen:', name);
-  state.screen = name;
+    console.log('renderScreen:', name);
+    state.screen = name;
 
-  // Explicit, unconditional: whatever screen we're going to, every other
-  // screen — loading included — is hidden. This is what guarantees the
-  // loading screen can never stay on top of another screen.
-  Object.keys(el.screens).forEach((key) => {
-    el.screens[key].hidden = key !== name;
-  });
-  // Belt-and-braces in case a new screen is ever added to the DOM but
-  // forgotten in el.screens: loading is never allowed to stay visible
-  // once we've decided to render anything else.
-  if (name !== 'loading' && el.screens.loading) el.screens.loading.hidden = true;
+    // Explicit, unconditional: whatever screen we're going to, every other
+    // screen — loading included — is hidden. This is what guarantees the
+    // loading screen can never stay on top of another screen.
+    Object.keys(el.screens).forEach((key) => {
+      el.screens[key].hidden = key !== name;
+    });
+    // Belt-and-braces in case a new screen is ever added to the DOM but
+    // forgotten in el.screens: loading is never allowed to stay visible
+    // once we've decided to render anything else.
+    if (name !== 'loading' && el.screens.loading) el.screens.loading.hidden = true;
 
-  el.mainHeader.hidden = name === 'loading';
-  el.topbarTitle.hidden = name !== 'import';
-  el.topbarTitle.textContent = SCREEN_TITLES[name];
-  el.setSwitch.hidden = name === 'loading' || name === 'import' || state.sets.length === 0;
-  el.bottomnav.hidden = name === 'loading' || name === 'import';
-  el.syncBadge.hidden = name === 'loading';
+    el.mainHeader.hidden = name === 'loading';
+    el.topbarTitle.hidden = name !== 'import';
+    el.topbarTitle.textContent = SCREEN_TITLES[name];
+    el.setSwitch.hidden = name === 'loading' || name === 'import' || state.sets.length === 0;
+    el.bottomnav.hidden = name === 'loading' || name === 'import';
+    el.syncBadge.hidden = name === 'loading';
 
-  document.querySelectorAll('.nav-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.screen === name);
-  });
+    document.querySelectorAll('.nav-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.screen === name);
+    });
 
-  if (name === 'learn') startLearnSession();
-  if (name === 'review') renderReview();
-  if (name === 'progress') renderProgress();
-}
+    if (name === 'learn') startLearnSession();
+    if (name === 'review') renderReview();
+    if (name === 'progress') renderProgress();
+  }
 
   // ---------------------------------------------------------------------
   // Set switcher (header dropdown + add/delete)
@@ -936,77 +937,78 @@
   }
 
   async function boot() {
-  cacheDom();
-  wireEvents();
-  initTelegram();
+    cacheDom();
+    wireEvents();
+    initTelegram();
 
-  const INIT_TIMEOUT_MS = 2000;
+    const INIT_TIMEOUT_MS = 2000;
 
-  // The actual storage bootstrap (store creation + settings + sets list
-  // + active set id). Wrapped in its own function so it can be raced
-  // against a timeout below — a stuck CloudStorage callback must never
-  // be able to leave the loading screen up forever.
-    
-  async function loadStorage() {
-    state.store = await window.VocabStorage.VocabStore.create();
-    el.syncBadge.hidden = false;
-    el.syncBadge.className = 'sync-badge ' + state.store.backendName;
-    el.syncBadge.textContent = state.store.backendName === 'cloud'
-      ? 'Синхронизировано с Telegram'
-      : 'Локальный режим (без Telegram) — прогресс останется в этом браузере';
+    // The actual storage bootstrap (store creation + settings + sets list
+    // + active set id). Wrapped in its own function so it can be raced
+    // against a timeout below — a stuck CloudStorage callback must never
+    // be able to leave the loading screen up forever.
+    async function loadStorage() {
+      state.store = await window.VocabStorage.VocabStore.create();
+      el.syncBadge.hidden = false;
+      el.syncBadge.className = 'sync-badge ' + state.store.backendName;
+      el.syncBadge.textContent = state.store.backendName === 'cloud'
+        ? 'Синхронизировано с Telegram'
+        : 'Локальный режим (без Telegram) — прогресс останется в этом браузере';
 
-    state.settings = await state.store.getSettings();
-    await refreshSetsList();
-    state.activeSetId = await state.store.getActiveSetId();
-  }
-
-  let timedOut = false;
-  try {
-    const timeoutPromise = new Promise((resolve) => {
-      setTimeout(() => { timedOut = true; resolve('timeout'); }, INIT_TIMEOUT_MS);
-    });
-    const outcome = await Promise.race([loadStorage().then(() => 'done'), timeoutPromise]);
-    if (outcome === 'timeout') {
-      console.warn('Storage init exceeded', INIT_TIMEOUT_MS, 'ms — proceeding without waiting further.');
+      state.settings = await state.store.getSettings();
+      await refreshSetsList();
+      state.activeSetId = await state.store.getActiveSetId();
     }
-  } catch (e) {
-    console.error('Storage init failed:', e);
+
+    let timedOut = false;
+    try {
+      const timeoutPromise = new Promise((resolve) => {
+        setTimeout(() => { timedOut = true; resolve('timeout'); }, INIT_TIMEOUT_MS);
+      });
+      const outcome = await Promise.race([loadStorage().then(() => 'done'), timeoutPromise]);
+      if (outcome === 'timeout') {
+        console.warn('Storage init exceeded', INIT_TIMEOUT_MS, 'ms — proceeding without waiting further.');
+      }
+    } catch (e) {
+      console.error('Storage init failed:', e);
+    }
+
+    console.log('Storage loaded:', state.sets);
+    console.log('Active set:', state.activeSetId);
+
+    // Nothing usable yet (no sets, a still-empty result because we timed
+    // out, or an error above) — go straight to the import screen instead
+    // of leaving the loading screen up.
+    const totalWords = state.sets.reduce((sum, s) => sum + (s.termCount || 0), 0);
+    if (!state.store || state.sets.length === 0 || totalWords === 0) {
+      if (timedOut) console.warn('Proceeding to import screen after timeout with no confirmed sets.');
+      openImportScreen('first');
+      return;
+    }
+
+    if (!state.activeSetId || !state.sets.find((s) => s.id === state.activeSetId)) {
+      state.activeSetId = state.sets[0].id;
+      try { await state.store.setActiveSetId(state.activeSetId); }
+      catch (e) { console.error('Failed to persist active set id:', e); }
+    }
+
+    try {
+      await loadActiveSetTerms();
+    } catch (e) {
+      console.error('Failed to load active set terms:', e);
+    }
+
+    // Defensive fallback: sets existed but this particular set somehow has
+    // no terms — still don't get stuck, send the user to add words.
+    if (state.terms.length === 0) {
+      openImportScreen('add');
+      return;
+    }
+
+    renderSetSwitcher();
+    showScreen('learn');
   }
 
-  console.log('Storage loaded:', state.sets);
-  console.log('Active set:', state.activeSetId);
-
-  // Nothing usable yet (no sets, a still-empty result because we timed
-  // out, or an error above) — go straight to the import screen instead
-  // of leaving the loading screen up.
-  const totalWords = state.sets.reduce((sum, s) => sum + (s.termCount || 0), 0);
-  if (!state.store || state.sets.length === 0 || totalWords === 0) {
-    if (timedOut) console.warn('Proceeding to import screen after timeout with no confirmed sets.');
-    openImportScreen('first');
-    return;
-  }
-
-  if (!state.activeSetId || !state.sets.find((s) => s.id === state.activeSetId)) {
-    state.activeSetId = state.sets[0].id;
-    try { await state.store.setActiveSetId(state.activeSetId); }
-    catch (e) { console.error('Failed to persist active set id:', e); }
-  }
-
-  try {
-    await loadActiveSetTerms();
-  } catch (e) {
-    console.error('Failed to load active set terms:', e);
-  }
-
-  // Defensive fallback: sets existed but this particular set somehow has
-  // no terms — still don't get stuck, send the user to add words.
-  if (state.terms.length === 0) {
-    openImportScreen('add');
-    return;
-  }
-
-  renderSetSwitcher();
-  showScreen('learn');
-}
   document.addEventListener('DOMContentLoaded', boot);
 })();
+```
