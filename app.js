@@ -101,6 +101,23 @@
     toastTimer = setTimeout(() => { el.toast.hidden = true; }, ms || 2200);
   }
 
+  function applyTheme(theme) {
+    const chosen = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = chosen;
+    if (el.btnTheme) {
+      el.btnTheme.dataset.theme = chosen;
+      el.btnTheme.setAttribute('aria-label', chosen === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему');
+    }
+    try { localStorage.setItem('vocab_theme', chosen); } catch (e) { /* optional preference */ }
+  }
+
+  function initTheme() {
+    let saved = null;
+    try { saved = localStorage.getItem('vocab_theme'); } catch (e) { /* ignore */ }
+    const preferred = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    applyTheme(saved || preferred);
+  }
+
   function escapeHtml(s) {
     const d = document.createElement('div');
     d.textContent = s;
@@ -137,6 +154,10 @@
     console.log('renderScreen:', name);
     state.screen = name;
     window.scrollTo(0, 0);
+    if (el.setMenu) {
+      el.setMenu.hidden = true;
+      el.btnSetMenu.setAttribute('aria-expanded', 'false');
+    }
 
     // Explicit, unconditional: whatever screen we're going to, every other
     // screen — loading included — is hidden. This is what guarantees the
@@ -182,6 +203,11 @@
     });
     el.setSelect.innerHTML = html;
     el.btnDeleteSet.hidden = state.activeSetId === ALL_SETS_ID;
+    el.btnEditLanguage.disabled = state.activeSetId === ALL_SETS_ID;
+    el.manualSetSelect.innerHTML = state.sets.map((set) =>
+      `<option value="${escapeHtml(set.id)}">${escapeHtml(set.name)} · ${languageLabel(set.language)}</option>`
+    ).join('');
+    if (state.activeSetId !== ALL_SETS_ID) el.manualSetSelect.value = state.activeSetId;
   }
 
   async function switchActiveSet(setId) {
@@ -295,6 +321,69 @@
     showScreen('learn');
   }
 
+  function openSurface(mode) {
+    el.setMenu.hidden = true;
+    el.btnSetMenu.setAttribute('aria-expanded', 'false');
+    el.surfaceBackdrop.hidden = false;
+    el.addWordForm.hidden = mode !== 'word';
+    el.setLanguageForm.hidden = mode !== 'language';
+
+    if (mode === 'word') {
+      el.surfaceTitle.textContent = 'Добавить слово';
+      if (state.activeSetId !== ALL_SETS_ID) el.manualSetSelect.value = state.activeSetId;
+      setTimeout(() => el.manualTerm.focus(), 60);
+      return;
+    }
+
+    const set = state.sets.find((item) => item.id === state.activeSetId);
+    if (!set) return closeSurface();
+    el.surfaceTitle.textContent = 'Язык набора';
+    el.setLanguageHint.textContent = `Выбери язык для набора «${set.name}». Слова автоматически переместятся в соответствующую группу.`;
+    el.editLanguageSelect.value = set.language || 'mixed';
+    setTimeout(() => el.editLanguageSelect.focus(), 60);
+  }
+
+  function closeSurface() {
+    el.surfaceBackdrop.hidden = true;
+  }
+
+  async function addWordManually(event) {
+    event.preventDefault();
+    const setId = el.manualSetSelect.value;
+    const term = el.manualTerm.value.trim();
+    const translation = el.manualTranslation.value.trim();
+    const context = el.manualContext.value.trim();
+    if (!setId || !term || !translation) return;
+
+    const result = await state.store.addTerm(setId, Srs.makeTerm({ term, translation, context }));
+    if (!result.ok) {
+      showToast(result.reason === 'duplicate' ? 'Такое слово уже есть в наборе' : 'Не удалось добавить слово');
+      return;
+    }
+
+    await refreshSetsList();
+    if (state.activeSetId === setId || state.activeSetId === ALL_SETS_ID) await loadActiveSetTerms();
+    renderSetSwitcher();
+    el.addWordForm.reset();
+    el.manualSetSelect.value = setId;
+    closeSurface();
+    showToast(`«${term}» добавлено в набор`);
+    if (state.screen === 'learn') startLearnSession();
+    if (state.screen === 'review') renderReview();
+    if (state.screen === 'progress') renderProgress();
+  }
+
+  async function changeSetLanguage(event) {
+    event.preventDefault();
+    if (!state.activeSetId || state.activeSetId === ALL_SETS_ID) return;
+    await state.store.updateSetLanguage(state.activeSetId, el.editLanguageSelect.value);
+    await refreshSetsList();
+    await loadActiveSetTerms();
+    renderSetSwitcher();
+    closeSurface();
+    showToast('Язык набора изменён');
+  }
+
   // ---------------------------------------------------------------------
   // Stats helpers
   // ---------------------------------------------------------------------
@@ -379,7 +468,8 @@
     // so it never collides with the Study->Test flow of brand-new words.
     const frontIds = state.session.queue.slice(0, 4);
     const frontTerms = frontIds.map(getTermById).filter(Boolean);
-    if (frontTerms.length === 4 && frontTerms.every((t) => t.attempts > 0) && Math.random() < 0.2) {
+    const matchingLanguages = new Set(frontTerms.map((term) => (state.termMeta.get(term.id) || {}).language));
+    if (frontTerms.length === 4 && matchingLanguages.size === 1 && frontTerms.every((t) => t.attempts > 0) && Math.random() < 0.2) {
       renderMatching(frontTerms);
       return;
     }
@@ -789,6 +879,17 @@
     grid.className = 'matching-grid';
     card.appendChild(grid);
 
+    const leftHeading = document.createElement('div');
+    leftHeading.className = 'match-heading';
+    leftHeading.textContent = 'Русский';
+    const rightHeading = document.createElement('div');
+    rightHeading.className = 'match-heading';
+    const firstTerm = terms[0];
+    const firstMeta = firstTerm && state.termMeta.get(firstTerm.id);
+    rightHeading.textContent = firstMeta ? languageLabel(firstMeta.language) : 'Изучаемый язык';
+    grid.appendChild(leftHeading);
+    grid.appendChild(rightHeading);
+
     let selectedLeft = null;
     let selectedRight = null;
     let solvedIds = new Set();
@@ -803,8 +904,10 @@
       return cell;
     }
 
-    exercise.left.forEach((item) => grid.appendChild(makeCell(item)));
-    exercise.right.forEach((item) => grid.appendChild(makeCell(item)));
+    exercise.left.forEach((item, index) => {
+      grid.appendChild(makeCell(item));
+      if (exercise.right[index]) grid.appendChild(makeCell(exercise.right[index]));
+    });
 
     function onCellClick(cell, item) {
       if (cell.classList.contains('solved')) return;
@@ -871,6 +974,13 @@
       statTile(stats.successRate + '%', 'Точность');
 
     renderReviewList();
+    requestAnimationFrame(() => positionReviewIndicator(el.reviewTabs.querySelector('.tab.active')));
+  }
+
+  function positionReviewIndicator(tab) {
+    if (!tab || !el.reviewTabIndicator) return;
+    el.reviewTabIndicator.style.width = tab.offsetWidth + 'px';
+    el.reviewTabIndicator.style.transform = `translateX(${tab.offsetLeft}px)`;
   }
 
   function filteredReviewTerms() {
@@ -987,8 +1097,13 @@
       topbarTitle: $('#topbarTitle'),
       setSwitch: $('#setSwitch'),
       setSelect: $('#setSelect'),
+      btnSetMenu: $('#btnSetMenu'),
+      setMenu: $('#setMenu'),
       btnAddSet: $('#btnAddSet'),
+      btnAddWord: $('#btnAddWord'),
+      btnEditLanguage: $('#btnEditLanguage'),
       btnDeleteSet: $('#btnDeleteSet'),
+      btnTheme: $('#btnTheme'),
       syncBadge: $('#syncBadge'),
 
       screens: {
@@ -1019,6 +1134,7 @@
       reviewStats: $('#reviewStats'),
       btnQuickReview: $('#btnQuickReview'),
       reviewTabs: $('#reviewTabs'),
+      reviewTabIndicator: $('#reviewTabIndicator'),
       reviewList: $('#reviewList'),
       btnStartReview: $('#btnStartReview'),
 
@@ -1026,6 +1142,18 @@
       progressBarFill: $('#progressBarFill'),
       progressBarLabel: $('#progressBarLabel'),
       wordTable: $('#wordTable'),
+
+      surfaceBackdrop: $('#surfaceBackdrop'),
+      surfaceTitle: $('#surfaceTitle'),
+      btnCloseSurface: $('#btnCloseSurface'),
+      addWordForm: $('#addWordForm'),
+      manualSetSelect: $('#manualSetSelect'),
+      manualTerm: $('#manualTerm'),
+      manualTranslation: $('#manualTranslation'),
+      manualContext: $('#manualContext'),
+      setLanguageForm: $('#setLanguageForm'),
+      setLanguageHint: $('#setLanguageHint'),
+      editLanguageSelect: $('#editLanguageSelect'),
 
       toast: $('#toast')
     };
@@ -1056,8 +1184,21 @@
     });
 
     el.setSelect.addEventListener('change', (e) => switchActiveSet(e.target.value));
+    el.btnSetMenu.addEventListener('click', () => {
+      el.setMenu.hidden = !el.setMenu.hidden;
+      el.btnSetMenu.setAttribute('aria-expanded', String(!el.setMenu.hidden));
+    });
     el.btnAddSet.addEventListener('click', () => openImportScreen('add'));
+    el.btnAddWord.addEventListener('click', () => openSurface('word'));
+    el.btnEditLanguage.addEventListener('click', () => openSurface('language'));
     el.btnDeleteSet.addEventListener('click', deleteActiveSet);
+    el.btnTheme.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+    el.btnCloseSurface.addEventListener('click', closeSurface);
+    el.addWordForm.addEventListener('submit', addWordManually);
+    el.setLanguageForm.addEventListener('submit', changeSetLanguage);
+    el.surfaceBackdrop.addEventListener('click', (event) => {
+      if (event.target === el.surfaceBackdrop) closeSurface();
+    });
     el.btnQuickReview.addEventListener('click', startQuickReview);
 
     el.reviewTabs.addEventListener('click', (e) => {
@@ -1065,10 +1206,24 @@
       if (!tab) return;
       state.reviewFilter = tab.dataset.filter;
       document.querySelectorAll('#reviewTabs .tab').forEach((t) => t.classList.toggle('active', t === tab));
+      positionReviewIndicator(tab);
       renderReviewList();
     });
 
     el.btnLearnEmptyToReview.addEventListener('click', () => showScreen('review'));
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest('.set-menu-wrap')) {
+        el.setMenu.hidden = true;
+        el.btnSetMenu.setAttribute('aria-expanded', 'false');
+      }
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        closeSurface();
+        el.setMenu.hidden = true;
+      }
+    });
+    window.addEventListener('resize', () => positionReviewIndicator(el.reviewTabs.querySelector('.tab.active')));
   }
 
   async function deleteActiveSet() {
@@ -1087,6 +1242,7 @@
 
   async function boot() {
     cacheDom();
+    initTheme();
     wireEvents();
     initTelegram();
 

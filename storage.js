@@ -224,6 +224,15 @@
       return true;
     }
 
+    async updateSetLanguage(id, language) {
+      const sets = await this.listSets();
+      const entry = sets.find((s) => s.id === id);
+      if (!entry) return false;
+      entry.language = language || 'mixed';
+      await this._saveSetsIndex(sets);
+      return true;
+    }
+
     async deleteSet(id) {
       const sets = await this.listSets();
       const entry = sets.find((s) => s.id === id);
@@ -268,6 +277,32 @@
     /** Rewrites a single chunk of a set (used after scoring one term). */
     async saveChunk(setId, chunkIndex, chunkTerms) {
       return this.backend.setItem(`s_${setId}_${chunkIndex}`, JSON.stringify(chunkTerms));
+    }
+
+    /** Adds one term and safely repacks the set if the last cloud chunk is full. */
+    async addTerm(setId, term) {
+      const sets = await this.listSets();
+      const entry = sets.find((s) => s.id === setId);
+      if (!entry) return { ok: false, reason: 'missing_set' };
+
+      const data = await this.loadSetTerms(setId);
+      const normalized = (value) => (value || '').trim().toLocaleLowerCase();
+      if (data.terms.some((item) => normalized(item.term) === normalized(term.term))) {
+        return { ok: false, reason: 'duplicate' };
+      }
+
+      const chunks = packIntoChunks([...data.terms, term]);
+      await Promise.all(chunks.map((chunk, idx) =>
+        this.backend.setItem(`s_${setId}_${idx}`, JSON.stringify(chunk))
+      ));
+      if (entry.chunkCount > chunks.length) {
+        const unused = Array.from({ length: entry.chunkCount - chunks.length }, (_, i) => `s_${setId}_${chunks.length + i}`);
+        await this.backend.removeItems(unused);
+      }
+      entry.termCount = data.terms.length + 1;
+      entry.chunkCount = Math.max(chunks.length, 1);
+      await this._saveSetsIndex(sets);
+      return { ok: true };
     }
 
     /** Updates termCount stat on the set index (cosmetic, best-effort). */

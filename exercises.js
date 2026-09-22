@@ -41,12 +41,66 @@
     return left.length === right.length && left.every((word, i) => word === right[i]);
   }
 
+  function withoutLeadingArticle(value) {
+    return normalize(value).replace(/^(?:a|an|the|der|die|das|den|dem|des|ein|eine|einen|einem|einer)\s+/i, '');
+  }
+
+  function sameIgnoringLeadingArticle(a, b) {
+    const left = withoutLeadingArticle(a);
+    const right = withoutLeadingArticle(b);
+    return Boolean(left && right && left === right);
+  }
+
+  function editDistance(a, b) {
+    const left = Array.from(a);
+    const right = Array.from(b);
+    let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+    left.forEach((char, row) => {
+      const current = [row + 1];
+      right.forEach((other, column) => {
+        current.push(Math.min(
+          current[column] + 1,
+          previous[column + 1] + 1,
+          previous[column] + (char === other ? 0 : 1)
+        ));
+      });
+      previous = current;
+    });
+    return previous[right.length];
+  }
+
+  function closeEnough(a, b) {
+    if (a === b) return true;
+    const longest = Math.max(a.length, b.length);
+    if (longest < 5) return false;
+    const allowance = longest >= 9 ? 2 : 1;
+    return editDistance(a, b) <= allowance;
+  }
+
+  function fuzzyRussianWordsInAnyOrder(a, b) {
+    if (!/[а-яё]/i.test(b)) return false;
+    const given = normalize(a).split(' ').filter(Boolean);
+    const expected = normalize(b).split(' ').filter(Boolean);
+    if (given.length !== expected.length) return false;
+    const unused = expected.slice();
+    return given.every((word) => {
+      const matchIndex = unused.findIndex((candidate) => closeEnough(word, candidate));
+      if (matchIndex < 0) return false;
+      unused.splice(matchIndex, 1);
+      return true;
+    });
+  }
+
   function answersMatch(a, b) {
     const actual = answerVariants(a);
     const expected = answerVariants(b);
     if (actual.length === 0 || expected.length === 0) return false;
     return actual.some((given) => expected.some((answer) =>
-      given === answer || sameWordsInAnyOrder(given, answer)
+      given === answer ||
+      sameIgnoringLeadingArticle(given, answer) ||
+      sameWordsInAnyOrder(given, answer) ||
+      fuzzyRussianWordsInAnyOrder(given, answer) ||
+      closeEnough(given, answer)
     ));
   }
 
@@ -158,12 +212,12 @@
   // ---- 5. Matching pairs (bonus, used occasionally with small pools) ----
   function buildMatching(terms) {
     const chosen = shuffle(terms).slice(0, Math.min(4, terms.length));
-    const left = shuffle(chosen.map((t) => ({ termId: t.id, text: t.term, side: 'term' })));
-    const right = shuffle(chosen.map((t) => ({ termId: t.id, text: t.translation, side: 'translation' })));
+    const left = shuffle(chosen.map((t) => ({ termId: t.id, text: t.translation, side: 'translation' })));
+    const right = shuffle(chosen.map((t) => ({ termId: t.id, text: t.term, side: 'term' })));
     return {
       kind: 'matching',
       kindLabel: 'Найди пары',
-      promptLabel: 'Соедини слово и перевод',
+      promptLabel: 'Слева — русский, справа — изучаемый язык',
       left,
       right,
       termIds: chosen.map((t) => t.id)
