@@ -70,12 +70,32 @@
   // ---------------------------------------------------------------------
   // Telegram WebApp integration
   // ---------------------------------------------------------------------
+  function updateTelegramSafeArea(tg) {
+    const root = document.documentElement;
+    const device = tg.safeAreaInset || {};
+    const content = tg.contentSafeAreaInset || {};
+    ['top', 'right', 'bottom', 'left'].forEach((side) => {
+      const deviceValue = Number(device[side]);
+      const contentValue = Number(content[side]);
+      if (Number.isFinite(deviceValue)) root.style.setProperty(`--telegram-safe-${side}`, `${deviceValue}px`);
+      else root.style.removeProperty(`--telegram-safe-${side}`);
+      if (Number.isFinite(contentValue)) root.style.setProperty(`--telegram-content-safe-${side}`, `${contentValue}px`);
+      else root.style.removeProperty(`--telegram-content-safe-${side}`);
+    });
+  }
+
   function initTelegram() {
     const tg = window.Telegram && window.Telegram.WebApp;
     if (!tg || !tg.initData) return;
     try {
       tg.ready();
       tg.expand();
+      updateTelegramSafeArea(tg);
+      if (typeof tg.onEvent === 'function') {
+        tg.onEvent('safeAreaChanged', () => updateTelegramSafeArea(tg));
+        tg.onEvent('contentSafeAreaChanged', () => updateTelegramSafeArea(tg));
+        tg.onEvent('fullscreenChanged', () => requestAnimationFrame(() => updateTelegramSafeArea(tg)));
+      }
       if (tg.setHeaderColor && tg.isVersionAtLeast && tg.isVersionAtLeast('6.1')) {
         tg.setHeaderColor('secondary_bg_color');
       }
@@ -126,7 +146,10 @@
 
   function detectTermLanguage(text) {
     const value = (text || '').trim();
-    return /[äöüß]/i.test(value) || /\b(?:der|die|das|ein|eine|einen|einem|einer|nicht|sich|zu)\b/i.test(value)
+    const hasGermanMarker = /[äöüß]/i.test(value) ||
+      /\b(?:der|die|das|den|dem|des|ein|eine|einen|einem|einer|nicht|sich|zu|von|vom|auf|mit|für|über|unter|bei|nach|aus|um|gegen|ohne|durch|werden|haben|sein)\b/i.test(value) ||
+      /(?:ung|keit|heit|schaft|chen|lein|lich|isch|bar|los)$/i.test(value);
+    return hasGermanMarker
       ? 'de'
       : 'en';
   }
@@ -503,55 +526,6 @@
     }
   }
 
-  function speakTerm(term) {
-    if (!term || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
-      showToast('Озвучивание не поддерживается на этом устройстве');
-      return;
-    }
-    const meta = state.termMeta.get(term.id);
-    const utterance = new SpeechSynthesisUtterance(term.term);
-    utterance.lang = meta && meta.language === 'de' ? 'de-DE' : 'en-US';
-    utterance.rate = 0.9;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-  }
-
-  function makeSpeakButton(term) {
-    const button = document.createElement('button');
-    button.className = 'speak-btn';
-    button.type = 'button';
-    button.setAttribute('aria-label', 'Озвучить слово');
-    button.title = 'Озвучить слово';
-    button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9v6h4l5 4V5L9 9H5Zm12.5-1.5a6 6 0 0 1 0 9m-2-6.8a3 3 0 0 1 0 4.6"/></svg>';
-    button.addEventListener('click', () => speakTerm(term));
-    return button;
-  }
-
-  function makePronunciationActions(term) {
-    const actions = document.createElement('div');
-    actions.className = 'pronunciation-actions';
-    actions.appendChild(makeSpeakButton(term));
-
-    const meta = state.termMeta.get(term.id);
-    if (!meta || meta.language === 'en') {
-      const slug = term.term
-        .toLowerCase()
-        .trim()
-        .replace(/[’']/g, '')
-        .replace(/\s+/g, '-');
-      const link = document.createElement('a');
-      link.className = 'speak-btn cambridge-btn';
-      link.href = `https://dictionary.cambridge.org/pronunciation/english/${encodeURIComponent(slug)}`;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      link.setAttribute('aria-label', 'Открыть произношение в Cambridge Dictionary');
-      link.title = 'Произношение Cambridge: UK и US';
-      link.textContent = 'C';
-      actions.appendChild(link);
-    }
-    return actions;
-  }
-
   function appendTermSource(card, term) {
     const label = termSourceLabel(term);
     if (!label) return;
@@ -578,7 +552,6 @@
     t.className = 'study-term';
     t.textContent = term.term;
     termRow.appendChild(t);
-    termRow.appendChild(makePronunciationActions(term));
     card.appendChild(termRow);
 
     const tr = document.createElement('div');
@@ -646,9 +619,6 @@
       prompt.className = 'exercise-prompt';
       prompt.textContent = exercise.prompt;
       promptRow.appendChild(prompt);
-      if (exerciseTerm && exercise.prompt === exerciseTerm.term) {
-        promptRow.appendChild(makePronunciationActions(exerciseTerm));
-      }
       card.appendChild(promptRow);
     }
 
@@ -830,8 +800,6 @@
       answer.className = 'flash-answer';
       answer.textContent = exercise.answer;
       face.appendChild(answer);
-      const term = getTermById(exercise.termId);
-      if (term) face.appendChild(makeSpeakButton(term));
       showFlashButtons();
     });
 
