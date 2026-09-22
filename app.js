@@ -935,7 +935,7 @@
     else showScreen('learn');
   }
 
-  aasync function boot() {
+  async function boot() {
   cacheDom();
   wireEvents();
   initTelegram();
@@ -946,6 +946,7 @@
   // + active set id). Wrapped in its own function so it can be raced
   // against a timeout below — a stuck CloudStorage callback must never
   // be able to leave the loading screen up forever.
+    
   async function loadStorage() {
     state.store = await window.VocabStorage.VocabStore.create();
     el.syncBadge.hidden = false;
