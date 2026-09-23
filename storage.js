@@ -305,6 +305,36 @@
       return { ok: true };
     }
 
+    /** Updates one term while keeping its learning progress intact. */
+    async updateTerm(setId, term) {
+      const sets = await this.listSets();
+      const entry = sets.find((s) => s.id === setId);
+      if (!entry) return { ok: false, reason: 'missing_set' };
+
+      const data = await this.loadSetTerms(setId);
+      const index = data.terms.findIndex((item) => item.id === term.id);
+      if (index < 0) return { ok: false, reason: 'missing_term' };
+
+      const normalized = (value) => (value || '').trim().toLocaleLowerCase();
+      if (data.terms.some((item) => item.id !== term.id && normalized(item.term) === normalized(term.term))) {
+        return { ok: false, reason: 'duplicate' };
+      }
+
+      const updated = data.terms.slice();
+      updated[index] = term;
+      const chunks = packIntoChunks(updated);
+      await Promise.all(chunks.map((chunk, idx) =>
+        this.backend.setItem(`s_${setId}_${idx}`, JSON.stringify(chunk))
+      ));
+      if (entry.chunkCount > chunks.length) {
+        const unused = Array.from({ length: entry.chunkCount - chunks.length }, (_, i) => `s_${setId}_${chunks.length + i}`);
+        await this.backend.removeItems(unused);
+      }
+      entry.chunkCount = Math.max(chunks.length, 1);
+      await this._saveSetsIndex(sets);
+      return { ok: true };
+    }
+
     /** Updates termCount stat on the set index (cosmetic, best-effort). */
     async touchSetStats(id, termCount) {
       const sets = await this.listSets();

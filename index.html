@@ -81,6 +81,7 @@
       <p>Разделитель — точка с запятой <code>;</code> (предпочтительно) или запятая <code>,</code>.</p>
       <p>Поле <code>context</code> необязательно. Текст в кавычках поддерживается, файл может быть в UTF-8 (с BOM или без).</p>
       <p>Пример строки: <code>run;бежать;He can run fast.</code></p>
+      <p>Немецкие существительные указывай вместе с артиклем и с заглавной буквы: <code>die Erfahrung;опыт</code>.</p>
     </details>
   </section>
 
@@ -104,6 +105,14 @@
   <!-- ===================== REVIEW SCREEN ===================== -->
   <section class="screen" id="screen-review" hidden>
     <button class="btn btn-primary btn-quick-review" id="btnQuickReview">Повторить сейчас</button>
+    <div class="review-size-control" id="reviewSizeControl">
+      <div class="review-size-head">
+        <label for="reviewSize">Слов за повторение</label>
+        <output id="reviewSizeValue" for="reviewSize">10</output>
+      </div>
+      <input type="range" id="reviewSize" min="1" max="10" value="10" step="1">
+      <div class="review-size-scale"><span>1</span><span id="reviewSizeMax">10</span></div>
+    </div>
     <div class="stat-grid" id="reviewStats"></div>
 
     <div class="tabs" id="reviewTabs">
@@ -164,9 +173,10 @@
         <div><label class="field-label" for="manualTerm">Слово или фраза</label><input id="manualTerm" class="text-input" required autocomplete="off"></div>
         <div><label class="field-label" for="manualTranslation">Перевод</label><input id="manualTranslation" class="text-input" required autocomplete="off"></div>
       </div>
+      <p class="field-note" id="manualGermanHint" hidden>Немецкие существительные добавляй с артиклем и заглавной буквы: <strong>der Tisch</strong>, <strong>die Lampe</strong>, <strong>das Haus</strong>.</p>
       <label class="field-label" for="manualContext">Контекст <span class="optional">необязательно</span></label>
       <input id="manualContext" class="text-input" autocomplete="off" placeholder="Пример использования">
-      <button class="btn btn-primary btn-block" type="submit">Добавить в набор</button>
+      <button class="btn btn-primary btn-block" id="btnSaveWord" type="submit">Добавить в набор</button>
     </form>
 
     <form id="setLanguageForm" class="surface-form" hidden>

@@ -32,6 +32,10 @@
     return (str || '').toString().split(/\s*(?:[,;/|]|\s+или\s+)\s*/i).map(normalize).filter(Boolean);
   }
 
+  function rawAnswerVariants(str) {
+    return (str || '').toString().split(/\s*(?:[,;/|]|\s+или\s+)\s*/i).map((value) => value.trim()).filter(Boolean);
+  }
+
   function sameWordsInAnyOrder(a, b) {
     // Russian word order is flexible. Accept the same set of words in a
     // different order, but only when the expected answer is in Cyrillic.
@@ -41,14 +45,39 @@
     return left.length === right.length && left.every((word, i) => word === right[i]);
   }
 
-  function withoutLeadingArticle(value) {
-    return normalize(value).replace(/^(?:a|an|the|der|die|das|den|dem|des|ein|eine|einen|einem|einer)\s+/i, '');
+  function withoutLeadingEnglishArticle(value) {
+    return normalize(value).replace(/^(?:a|an|the)\s+/i, '');
   }
 
-  function sameIgnoringLeadingArticle(a, b) {
-    const left = withoutLeadingArticle(a);
-    const right = withoutLeadingArticle(b);
+  function sameIgnoringLeadingEnglishArticle(a, b) {
+    const left = withoutLeadingEnglishArticle(a);
+    const right = withoutLeadingEnglishArticle(b);
     return Boolean(left && right && left === right);
+  }
+
+  function wordsPreservingCase(value) {
+    return (value || '')
+      .trim()
+      .replace(/[.,!?;:"'`()\[\]{}]/g, '')
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  function validGermanForm(given, expected) {
+    const actualWords = wordsPreservingCase(given);
+    const expectedWords = wordsPreservingCase(expected);
+    if (!actualWords.length || !expectedWords.length) return false;
+
+    const articles = new Set(['der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einen', 'einem', 'einer']);
+    const expectedArticle = expectedWords[0].toLocaleLowerCase();
+    if (articles.has(expectedArticle) && actualWords[0].toLocaleLowerCase() !== expectedArticle) return false;
+
+    // German nouns are capitalized. If the stored correct form contains an
+    // uppercase word, require the learner to capitalize that word too.
+    return expectedWords.every((word, index) => {
+      if (!/^[A-ZÄÖÜ]/.test(word)) return true;
+      return Boolean(actualWords[index] && /^[A-ZÄÖÜ]/.test(actualWords[index]));
+    });
   }
 
   function editDistance(a, b) {
@@ -91,24 +120,33 @@
     });
   }
 
-  function answersMatch(a, b) {
-    const actual = answerVariants(a);
-    const expected = answerVariants(b);
+  function answersMatch(a, b, options) {
+    const actual = rawAnswerVariants(a);
+    const expected = rawAnswerVariants(b);
+    const language = options && options.language;
     if (actual.length === 0 || expected.length === 0) return false;
-    return actual.some((given) => expected.some((answer) =>
-      given === answer ||
-      sameIgnoringLeadingArticle(given, answer) ||
-      sameWordsInAnyOrder(given, answer) ||
-      fuzzyRussianWordsInAnyOrder(given, answer) ||
-      closeEnough(given, answer)
-    ));
+    return actual.some((givenRaw) => expected.some((answerRaw) => {
+      if (language === 'de' && !validGermanForm(givenRaw, answerRaw)) return false;
+      const given = normalize(givenRaw);
+      const answer = normalize(answerRaw);
+      return given === answer ||
+        (language !== 'de' && sameIgnoringLeadingEnglishArticle(given, answer)) ||
+        sameWordsInAnyOrder(given, answer) ||
+        fuzzyRussianWordsInAnyOrder(given, answer) ||
+        closeEnough(given, answer);
+    }));
   }
 
   // ---- 1. Multiple choice ------------------------------------------------
   function buildMultipleChoice(term, pool) {
-    const distractors = shuffle(
-      pool.filter((t) => t.id !== term.id && t.translation.toLowerCase() !== term.translation.toLowerCase())
-    ).slice(0, 3).map((t) => t.translation);
+    const seen = new Set([normalize(term.translation)]);
+    const distractors = shuffle(pool).filter((candidate) => {
+      if (candidate.id === term.id) return false;
+      const key = normalize(candidate.translation);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 3).map((candidate) => candidate.translation);
 
     const options = shuffle([term.translation, ...distractors]);
     return {
@@ -119,6 +157,7 @@
       context: term.context,
       options,
       correctAnswer: term.translation,
+      answerSide: 'translation',
       termId: term.id
     };
   }
@@ -134,6 +173,7 @@
       prompt: isToTranslation ? term.term : term.translation,
       context: term.context,
       correctAnswer: isToTranslation ? term.translation : term.term,
+      answerSide: isToTranslation ? 'translation' : 'term',
       termId: term.id
     };
   }
@@ -159,6 +199,7 @@
       prompt: display,
       context: term.context,
       correctAnswer: word,
+      answerSide: 'term',
       termId: term.id
     };
   }
@@ -185,6 +226,7 @@
       tiles: scrambled,
       joinWith: isPhrase ? ' ' : '',
       correctAnswer: word,
+      answerSide: 'term',
       termId: term.id
     };
   }
@@ -205,6 +247,7 @@
       promptLabel: showContext ? 'Вспомни слово по контексту' : 'Вспомни слово по переводу',
       prompt: showContext ? term.context : term.translation,
       answer: term.term,
+      answerSide: 'term',
       termId: term.id
     };
   }
@@ -228,7 +271,11 @@
   function pickExerciseType(term, pool) {
     const types = ['multiple_choice', 'type_answer', 'spelling', 'flashcard'];
     // Multiple choice needs at least 3 other distinct translations.
-    if (pool.filter((t) => t.id !== term.id).length < 3) {
+    const distinctTranslations = new Set(pool
+      .filter((candidate) => candidate.id !== term.id)
+      .map((candidate) => normalize(candidate.translation))
+      .filter((translation) => translation && translation !== normalize(term.translation)));
+    if (distinctTranslations.size < 3) {
       types.splice(types.indexOf('multiple_choice'), 1);
     }
     const type = types[Math.floor(Math.random() * types.length)];

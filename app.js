@@ -60,7 +60,9 @@
       answered: false,
       pendingStudyTermId: null // set while Phase 1 (study) is showing, before Phase 2 test
     },
-    reviewFilter: 'due'
+    reviewFilter: 'due',
+    reviewSize: 10,
+    editingTermId: null
   };
 
   let el = {}; // populated on DOMContentLoaded
@@ -138,14 +140,20 @@
     applyTheme(saved || preferred);
   }
 
+  function initReviewSize() {
+    let saved = 10;
+    try { saved = Number(localStorage.getItem('vocab_review_size')) || 10; } catch (e) { /* optional preference */ }
+    state.reviewSize = Math.max(1, Math.round(saved));
+  }
+
   function escapeHtml(s) {
     const d = document.createElement('div');
     d.textContent = s;
     return d.innerHTML;
   }
 
-  function detectTermLanguage(text) {
-    const value = (text || '').trim();
+  function detectTermLanguage(text, context) {
+    const value = `${text || ''} ${context || ''}`.trim();
     const hasGermanMarker = /[äöüß]/i.test(value) ||
       /\b(?:der|die|das|den|dem|des|ein|eine|einen|einem|einer|nicht|sich|zu|von|vom|auf|mit|für|über|unter|bei|nach|aus|um|gegen|ohne|durch|werden|haben|sein)\b/i.test(value) ||
       /(?:ung|keit|heit|schaft|chen|lein|lich|isch|bar|los)$/i.test(value);
@@ -154,8 +162,14 @@
       : 'en';
   }
 
+  function isLikelyGermanNounWithoutArticle(text) {
+    const value = (text || '').trim();
+    const hasArticle = /^(?:der|die|das|den|dem|des|ein|eine|einen|einem|einer)\s+/i.test(value);
+    return !hasArticle && /^[A-ZÄÖÜ][A-Za-zÄÖÜäöüß-]*(?:\s|$)/.test(value);
+  }
+
   function inferSetLanguage(terms) {
-    const languages = new Set(terms.map((term) => detectTermLanguage(term.term)));
+    const languages = new Set(terms.map((term) => detectTermLanguage(term.term, term.context)));
     if (languages.size === 1) return [...languages][0];
     return 'mixed';
   }
@@ -264,7 +278,7 @@
       const setLanguage = set.language || inferSetLanguage(data.terms);
       set.language = setLanguage;
       data.terms.forEach((term) => {
-        const language = setLanguage === 'mixed' ? detectTermLanguage(term.term) : setLanguage;
+        const language = setLanguage === 'mixed' ? detectTermLanguage(term.term, term.context) : setLanguage;
         state.terms.push(term);
         state.chunkMap.set(term.id, { setId: set.id, chunkIdx: data.chunkMap.get(term.id) });
         state.termMeta.set(term.id, { setId: set.id, setName: set.name, language });
@@ -340,20 +354,54 @@
     await loadActiveSetTerms();
     renderSetSwitcher();
 
-    showToast(`Набор «${name}» создан: ${terms.length} слов`);
     showScreen('learn');
+    const missingArticles = language === 'de'
+      ? terms.filter((term) => isLikelyGermanNounWithoutArticle(term.term)).length
+      : 0;
+    showToast(missingArticles
+      ? `Набор создан. Проверь артикли у ${missingArticles} немецких слов в «Прогрессе».`
+      : `Набор «${name}» создан: ${terms.length} слов`, missingArticles ? 5200 : 2200);
   }
 
-  function openSurface(mode) {
+  function updateManualLanguageHint() {
+    const set = state.sets.find((item) => item.id === el.manualSetSelect.value);
+    el.manualGermanHint.hidden = !set || set.language !== 'de';
+    el.manualTerm.placeholder = set && set.language === 'de' ? 'Например: die Erfahrung' : '';
+  }
+
+  function openSurface(mode, termId) {
     el.setMenu.hidden = true;
     el.btnSetMenu.setAttribute('aria-expanded', 'false');
     el.surfaceBackdrop.hidden = false;
-    el.addWordForm.hidden = mode !== 'word';
+    el.addWordForm.hidden = mode !== 'word' && mode !== 'edit-word';
     el.setLanguageForm.hidden = mode !== 'language';
 
     if (mode === 'word') {
+      state.editingTermId = null;
       el.surfaceTitle.textContent = 'Добавить слово';
+      el.btnSaveWord.textContent = 'Добавить в набор';
+      el.manualSetSelect.disabled = false;
+      el.addWordForm.reset();
       if (state.activeSetId !== ALL_SETS_ID) el.manualSetSelect.value = state.activeSetId;
+      updateManualLanguageHint();
+      setTimeout(() => el.manualTerm.focus(), 60);
+      return;
+    }
+
+    if (mode === 'edit-word') {
+      const term = getTermById(termId);
+      const meta = term && state.termMeta.get(term.id);
+      if (!term || !meta) return closeSurface();
+      state.editingTermId = term.id;
+      el.surfaceTitle.textContent = 'Изменить слово';
+      el.btnSaveWord.textContent = 'Сохранить изменения';
+      el.manualSetSelect.value = meta.setId;
+      el.manualSetSelect.disabled = true;
+      el.manualTerm.value = term.term;
+      el.manualTranslation.value = term.translation;
+      el.manualContext.value = term.context || '';
+      updateManualLanguageHint();
+      el.manualGermanHint.hidden = meta.language !== 'de';
       setTimeout(() => el.manualTerm.focus(), 60);
       return;
     }
@@ -368,6 +416,8 @@
 
   function closeSurface() {
     el.surfaceBackdrop.hidden = true;
+    el.manualSetSelect.disabled = false;
+    state.editingTermId = null;
   }
 
   async function addWordManually(event) {
@@ -378,7 +428,13 @@
     const context = el.manualContext.value.trim();
     if (!setId || !term || !translation) return;
 
-    const result = await state.store.addTerm(setId, Srs.makeTerm({ term, translation, context }));
+    const editingTerm = state.editingTermId ? getTermById(state.editingTermId) : null;
+    const termObject = editingTerm
+      ? { ...editingTerm, term, translation, context }
+      : Srs.makeTerm({ term, translation, context });
+    const result = editingTerm
+      ? await state.store.updateTerm(setId, termObject)
+      : await state.store.addTerm(setId, termObject);
     if (!result.ok) {
       showToast(result.reason === 'duplicate' ? 'Такое слово уже есть в наборе' : 'Не удалось добавить слово');
       return;
@@ -390,7 +446,12 @@
     el.addWordForm.reset();
     el.manualSetSelect.value = setId;
     closeSurface();
-    showToast(`«${term}» добавлено в набор`);
+    state.editingTermId = null;
+    const set = state.sets.find((item) => item.id === setId);
+    const articleWarning = set && set.language === 'de' && isLikelyGermanNounWithoutArticle(term);
+    showToast(articleWarning
+      ? `Сохранено. Проверь артикль у «${term}».`
+      : editingTerm ? 'Слово обновлено' : `«${term}» добавлено в набор`, articleWarning ? 4200 : 2200);
     if (state.screen === 'learn') startLearnSession();
     if (state.screen === 'review') renderReview();
     if (state.screen === 'progress') renderProgress();
@@ -498,7 +559,7 @@
     }
 
     state.session.answered = false;
-    const exercise = Ex.pickExerciseType(term, state.terms);
+    const exercise = prepareExercise(Ex.pickExerciseType(term, state.terms), term);
     renderExercise(exercise);
   }
 
@@ -585,8 +646,55 @@
       ? Ex.buildMultipleChoice(term, state.terms)
       : Ex.buildTypeAnswer(term);
     exercise.kindLabel = 'Проверка';
+    prepareExercise(exercise, term);
     state.session.answered = false;
     renderExercise(exercise);
+  }
+
+  function prepareExercise(exercise, term) {
+    const meta = term && state.termMeta.get(term.id);
+    exercise.answerLanguage = exercise.answerSide === 'term' && meta ? meta.language : 'ru';
+    return exercise;
+  }
+
+  function maskedAnswer(answer) {
+    const firstVariant = (answer || '').split(/\s*(?:[,;/|]|\s+или\s+)\s*/i)[0].trim();
+    const germanArticles = new Set(['der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'einen', 'einem', 'einer']);
+    return firstVariant.split(/\s+/).map((word, index) => {
+      const clean = word.replace(/[^A-Za-zА-Яа-яЁёÄÖÜäöüß-]/g, '');
+      if (!clean) return word;
+      if (index === 0 && germanArticles.has(clean.toLocaleLowerCase())) return clean;
+      const chars = Array.from(clean);
+      return chars[0] + '•'.repeat(Math.max(1, Math.min(chars.length - 1, 8))) + ` (${chars.length})`;
+    }).join(' ');
+  }
+
+  function revealTextHint(card, exercise, button) {
+    if (button) button.disabled = true;
+    let note = card.querySelector('.exercise-hint');
+    if (!note) {
+      note = document.createElement('div');
+      note.className = 'exercise-hint';
+      const anchor = card.querySelector('.feedback') || card.querySelector('.exercise-actions');
+      card.insertBefore(note, anchor || null);
+    }
+    const answer = exercise.correctAnswer || exercise.answer || '';
+    const escapedAnswer = answer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const safeContext = exercise.context && escapedAnswer
+      ? exercise.context.replace(new RegExp(escapedAnswer, 'gi'), '_____')
+      : exercise.context;
+    note.textContent = safeContext
+      ? `Контекст: «${safeContext}»`
+      : `Подсказка: ${maskedAnswer(exercise.correctAnswer || exercise.answer)}`;
+  }
+
+  function makeHintButton(onClick) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-ghost hint-btn';
+    button.textContent = 'Подсказка';
+    button.addEventListener('click', () => onClick(button));
+    return button;
   }
 
   // ---- Generic exercise rendering (multiple choice / type / spelling / flashcard) ----
@@ -638,6 +746,18 @@
       });
       card.appendChild(grid);
       card.appendChild(feedback);
+      const hintRow = document.createElement('div');
+      hintRow.className = 'exercise-actions hint-actions';
+      hintRow.appendChild(makeHintButton((button) => {
+        const wrong = Array.from(grid.children).find((item) => item.textContent !== exercise.correctAnswer && !item.disabled);
+        if (wrong) {
+          wrong.disabled = true;
+          wrong.classList.add('hint-eliminated');
+          button.disabled = true;
+          button.textContent = 'Один вариант убран';
+        }
+      }));
+      card.appendChild(hintRow);
       return;
     }
 
@@ -651,7 +771,7 @@
       input.placeholder = 'Введите ответ или оставьте пустым';
       card.appendChild(input);
       card.appendChild(feedback);
-      const actions = buildActionsRow();
+      const actions = buildActionsRow((button) => revealTextHint(card, exercise, button));
       const checkBtn = actions.querySelector('.btn-primary');
       checkBtn.textContent = 'Проверить';
       checkBtn.addEventListener('click', () => handleTypedAnswer(input.value, exercise, input, feedback, checkBtn));
@@ -667,9 +787,10 @@
     }
   }
 
-  function buildActionsRow() {
+  function buildActionsRow(onHint) {
     const row = document.createElement('div');
     row.className = 'exercise-actions';
+    if (onHint) row.appendChild(makeHintButton(onHint));
     const primary = document.createElement('button');
     primary.className = 'btn btn-primary';
     primary.textContent = 'Проверить';
@@ -677,12 +798,12 @@
     return row;
   }
 
-  function showFeedback(feedback, isCorrect, correctAnswer) {
+  function showFeedback(feedback, isCorrect, correctAnswer, note) {
     feedback.hidden = false;
     feedback.className = 'feedback ' + (isCorrect ? 'ok' : 'bad');
     feedback.innerHTML = isCorrect
       ? '✓ Верно!'
-      : `✗ Неверно. Правильный ответ: <strong>${escapeHtml(correctAnswer)}</strong>`;
+      : `✗ Неверно. Правильный ответ: <strong>${escapeHtml(correctAnswer)}</strong>${note ? `<span class="feedback-note">${escapeHtml(note)}</span>` : ''}`;
   }
 
   function appendContinueButton(card, onNext) {
@@ -703,7 +824,8 @@
       if (btn.textContent === exercise.correctAnswer) btn.classList.add('correct');
       else if (btn.textContent === chosen && !isCorrect) btn.classList.add('incorrect');
     });
-    showFeedback(feedback, isCorrect, exercise.correctAnswer);
+    showFeedback(feedback, isCorrect, exercise.correctAnswer,
+      !isCorrect && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
     scoreTerm(exercise.termId, isCorrect);
     appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(isCorrect));
   }
@@ -711,10 +833,11 @@
   function handleTypedAnswer(value, exercise, input, feedback, checkBtn) {
     if (state.session.answered) return;
     state.session.answered = true;
-    const isCorrect = Ex.answersMatch(value, exercise.correctAnswer);
+    const isCorrect = Ex.answersMatch(value, exercise.correctAnswer, { language: exercise.answerLanguage });
     input.disabled = true;
     checkBtn.remove();
-    showFeedback(feedback, isCorrect, exercise.correctAnswer);
+    showFeedback(feedback, isCorrect, exercise.correctAnswer,
+      !isCorrect && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
     scoreTerm(exercise.termId, isCorrect);
     appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(isCorrect));
   }
@@ -762,8 +885,9 @@
       if (state.session.answered) return;
       state.session.answered = true;
       const userAnswer = assembled.map((a) => a.unit).join(exercise.joinWith);
-      const isCorrect = Ex.answersMatch(userAnswer, exercise.correctAnswer);
-      showFeedback(feedback, isCorrect, exercise.correctAnswer);
+      const isCorrect = Ex.answersMatch(userAnswer, exercise.correctAnswer, { language: exercise.answerLanguage });
+      showFeedback(feedback, isCorrect, exercise.correctAnswer,
+        !isCorrect && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
       scoreTerm(exercise.termId, isCorrect);
       appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(isCorrect));
     }
@@ -771,6 +895,10 @@
     card.appendChild(assembledRow);
     card.appendChild(tilesRow);
     card.appendChild(feedback);
+    const hintRow = document.createElement('div');
+    hintRow.className = 'exercise-actions hint-actions';
+    hintRow.appendChild(makeHintButton((button) => revealTextHint(card, exercise, button)));
+    card.appendChild(hintRow);
   }
 
   function renderFlashcard(card, exercise) {
@@ -877,6 +1005,18 @@
       if (exercise.right[index]) grid.appendChild(makeCell(exercise.right[index]));
     });
 
+    const hintRow = document.createElement('div');
+    hintRow.className = 'exercise-actions hint-actions';
+    hintRow.appendChild(makeHintButton((button) => {
+      const availableId = exercise.termIds.find((id) => !solvedIds.has(id));
+      if (!availableId) return;
+      const pair = Array.from(grid.querySelectorAll(`[data-term-id="${CSS.escape(availableId)}"]`));
+      pair.forEach((item) => item.classList.add('hint-pair'));
+      button.disabled = true;
+      setTimeout(() => pair.forEach((item) => item.classList.remove('hint-pair')), 1300);
+    }));
+    card.appendChild(hintRow);
+
     function onCellClick(cell, item) {
       if (cell.classList.contains('solved')) return;
       if (item.side === 'term') {
@@ -928,11 +1068,28 @@
     return `<div class="stat-tile"><div class="stat-num">${num}</div><div class="stat-label">${label}</div></div>`;
   }
 
+  function effectiveReviewSize(poolSize) {
+    return Math.max(0, Math.min(state.reviewSize, poolSize));
+  }
+
+  function renderReviewSizeControl() {
+    const max = Math.max(1, state.terms.length);
+    const value = Math.max(1, Math.min(state.reviewSize, max));
+    el.reviewSize.max = String(max);
+    el.reviewSize.value = String(value);
+    el.reviewSize.disabled = state.terms.length === 0;
+    el.reviewSizeValue.value = String(state.terms.length ? value : 0);
+    el.reviewSizeValue.textContent = String(state.terms.length ? value : 0);
+    el.reviewSizeMax.textContent = String(state.terms.length);
+  }
+
   function renderReview() {
     const stats = computeStats(state.terms);
     const availableNow = state.terms.filter((term) => term.attempts > 0);
+    const quickPoolSize = availableNow.length || state.terms.length;
+    renderReviewSizeControl();
     el.btnQuickReview.hidden = state.terms.length === 0;
-    el.btnQuickReview.textContent = `Повторить сейчас · ${Math.min((availableNow.length || state.terms.length), SESSION_SIZE)}`;
+    el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(quickPoolSize)}`;
     el.reviewStats.innerHTML =
       statTile(stats.total, 'Всего') +
       statTile(stats.new, 'Новые') +
@@ -993,8 +1150,9 @@
       </div>
     `).join('');
     el.btnStartReview.hidden = false;
+    el.btnStartReview.textContent = `Повторить эти слова · ${effectiveReviewSize(items.length)}`;
     el.btnStartReview.onclick = () => {
-      const ids = items.slice(0, SESSION_SIZE).map((t) => t.id);
+      const ids = items.slice(0, effectiveReviewSize(items.length)).map((t) => t.id);
       showScreen('learn');
       startLearnSession(ids);
     };
@@ -1003,7 +1161,7 @@
   function startQuickReview() {
     const attempted = state.terms.filter((term) => term.attempts > 0);
     const pool = attempted.length ? attempted : state.terms;
-    const ids = Ex.shuffle(pool).slice(0, SESSION_SIZE).map((term) => term.id);
+    const ids = Ex.shuffle(pool).slice(0, effectiveReviewSize(pool.length)).map((term) => term.id);
     if (ids.length === 0) return;
     showScreen('learn');
     startLearnSession(ids);
@@ -1040,8 +1198,11 @@
       return `
         <div class="word-row">
           <div class="word-row-top">
-            <div class="word-row-term">${escapeHtml(t.term)} <span style="color:var(--ink-soft);font-weight:400;">— ${escapeHtml(t.translation)}</span></div>
-            ${badgeFor(t)}
+            <div class="word-row-term">${escapeHtml(t.term)} <span class="word-row-translation">— ${escapeHtml(t.translation)}</span></div>
+            <div class="word-row-actions">
+              ${badgeFor(t)}
+              <button class="word-edit-btn" type="button" data-edit-term="${escapeHtml(t.id)}" aria-label="Изменить ${escapeHtml(t.term)}">Изменить</button>
+            </div>
           </div>
           <div class="term-source">${escapeHtml(termSourceLabel(t))}</div>
           <div class="word-row-details">
@@ -1092,7 +1253,6 @@
       btnLoadDemo: $('#btnLoadDemo'),
       btnCancelImport: $('#btnCancelImport'),
       importErrors: $('#importErrors'),
-
       learnProgressFill: $('#learnProgressFill'),
       learnCounter: $('#learnCounter'),
       exerciseCard: $('#exerciseCard'),
@@ -1101,6 +1261,9 @@
 
       reviewStats: $('#reviewStats'),
       btnQuickReview: $('#btnQuickReview'),
+      reviewSize: $('#reviewSize'),
+      reviewSizeValue: $('#reviewSizeValue'),
+      reviewSizeMax: $('#reviewSizeMax'),
       reviewTabs: $('#reviewTabs'),
       reviewTabIndicator: $('#reviewTabIndicator'),
       reviewList: $('#reviewList'),
@@ -1119,6 +1282,8 @@
       manualTerm: $('#manualTerm'),
       manualTranslation: $('#manualTranslation'),
       manualContext: $('#manualContext'),
+      manualGermanHint: $('#manualGermanHint'),
+      btnSaveWord: $('#btnSaveWord'),
       setLanguageForm: $('#setLanguageForm'),
       setLanguageHint: $('#setLanguageHint'),
       editLanguageSelect: $('#editLanguageSelect'),
@@ -1163,11 +1328,21 @@
     el.btnTheme.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
     el.btnCloseSurface.addEventListener('click', closeSurface);
     el.addWordForm.addEventListener('submit', addWordManually);
+    el.manualSetSelect.addEventListener('change', updateManualLanguageHint);
     el.setLanguageForm.addEventListener('submit', changeSetLanguage);
     el.surfaceBackdrop.addEventListener('click', (event) => {
       if (event.target === el.surfaceBackdrop) closeSurface();
     });
     el.btnQuickReview.addEventListener('click', startQuickReview);
+    el.reviewSize.addEventListener('input', () => {
+      state.reviewSize = Math.max(1, Number(el.reviewSize.value) || 1);
+      try { localStorage.setItem('vocab_review_size', String(state.reviewSize)); } catch (e) { /* optional preference */ }
+      renderReview();
+    });
+    el.wordTable.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-edit-term]');
+      if (button) openSurface('edit-word', button.dataset.editTerm);
+    });
 
     el.reviewTabs.addEventListener('click', (e) => {
       const tab = e.target.closest('.tab');
@@ -1211,6 +1386,7 @@
   async function boot() {
     cacheDom();
     initTheme();
+    initReviewSize();
     wireEvents();
     initTelegram();
 
