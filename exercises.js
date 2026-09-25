@@ -240,14 +240,13 @@
 
   // ---- 4. Flashcard ------------------------------------------------
   function buildFlashcard(term) {
-    const showContext = Boolean(term.context) && Math.random() < 0.5;
     return {
       kind: 'flashcard',
       kindLabel: 'Карточка',
-      promptLabel: showContext ? 'Вспомни слово по контексту' : 'Вспомни слово по переводу',
-      prompt: showContext ? term.context : term.translation,
-      answer: term.term,
-      answerSide: 'term',
+      promptLabel: 'Вспомни перевод выражения',
+      prompt: term.term,
+      answer: term.translation,
+      answerSide: 'translation',
       termId: term.id
     };
   }

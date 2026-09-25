@@ -1241,6 +1241,30 @@ body,
   background:var(--surface);
   box-shadow:0 5px 16px rgba(40,46,78,.04);
 }
+.streak-card{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  padding:13px 15px;
+  border:1px solid var(--border);
+  border-radius:16px;
+  background:var(--surface);
+  box-shadow:0 5px 16px rgba(40,46,78,.04);
+}
+.streak-icon{
+  display:grid;
+  place-items:center;
+  width:38px;
+  height:38px;
+  flex:none;
+  border-radius:12px;
+  background:var(--gold-soft);
+  color:var(--gold);
+  font-size:22px;
+}
+.streak-card div{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.streak-card strong{font-size:14px;color:var(--ink);}
+.streak-card div span{font-size:11.5px;color:var(--ink-soft);}
 .review-size-head,.review-size-scale{display:flex;align-items:center;justify-content:space-between;gap:12px;}
 .review-size-head label{font-size:13px;font-weight:700;color:var(--ink);}
 .review-size-head output{

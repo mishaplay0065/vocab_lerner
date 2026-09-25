@@ -175,6 +175,14 @@
     }
     async setSettings(settings) { return this.backend.setItem('settings', JSON.stringify(settings)); }
 
+    async getActivity() {
+      const raw = await this.backend.getItem('activity');
+      if (!raw) return { lastDay: null, streak: 0, longest: 0 };
+      try { return JSON.parse(raw); }
+      catch { return { lastDay: null, streak: 0, longest: 0 }; }
+    }
+    async setActivity(activity) { return this.backend.setItem('activity', JSON.stringify(activity)); }
+
     // ---- sets index ----
     async listSets() {
       const raw = await this.backend.getItem('sets_index');

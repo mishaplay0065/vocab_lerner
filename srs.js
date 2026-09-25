@@ -84,6 +84,36 @@
     return (now - term.last_seen) > days * 24 * 60 * 60 * 1000;
   }
 
+  function localDay(date) {
+    const value = date || new Date();
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  function dayDistance(from, to) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from || '') || !/^\d{4}-\d{2}-\d{2}$/.test(to || '')) return NaN;
+    const [fromYear, fromMonth, fromDay] = from.split('-').map(Number);
+    const [toYear, toMonth, toDay] = to.split('-').map(Number);
+    return Math.round((Date.UTC(toYear, toMonth - 1, toDay) - Date.UTC(fromYear, fromMonth - 1, fromDay)) / 86400000);
+  }
+
+  function recordPractice(activity, today) {
+    const previous = activity || {};
+    const day = today || localDay();
+    if (previous.lastDay === day) return previous;
+    const consecutive = dayDistance(previous.lastDay, day) === 1;
+    const streak = consecutive ? (previous.streak || 0) + 1 : 1;
+    return { lastDay: day, streak, longest: Math.max(previous.longest || 0, streak) };
+  }
+
+  function currentStreak(activity, today) {
+    if (!activity || !activity.lastDay) return 0;
+    const distance = dayDistance(activity.lastDay, today || localDay());
+    return distance === 0 || distance === 1 ? activity.streak || 0 : 0;
+  }
+
   global.VocabSrs = {
     DEFAULT_INTERVALS_DAYS,
     RELEARN_MINUTES,
@@ -91,6 +121,9 @@
     applyAnswer,
     isDue,
     isStale,
-    statusFor
+    statusFor,
+    localDay,
+    recordPractice,
+    currentStreak
   };
 })(window);

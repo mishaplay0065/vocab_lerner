@@ -52,6 +52,7 @@
     chunkMap: new Map(),       // termId -> {setId, chunkIdx}, for cheap partial saves
     termMeta: new Map(),       // termId -> {setId, setName, language}
     settings: null,
+    activity: { lastDay: null, streak: 0, longest: 0 },
     screen: 'loading',       // loading | import | learn | review | progress
     importMode: 'first',    // 'first' (no sets yet) | 'add' (adding another set)
     session: {
@@ -573,6 +574,12 @@
     const term = getTermById(termId);
     if (!term) return;
     Srs.applyAnswer(term, isCorrect, state.settings.intervalsDays);
+    const nextActivity = Srs.recordPractice(state.activity);
+    let activityWrite = Promise.resolve();
+    if (nextActivity !== state.activity) {
+      state.activity = nextActivity;
+      activityWrite = state.store.setActivity(nextActivity);
+    }
 
     // Persist just the one chunk this term lives in, not the whole set —
     // keeps writes small and fast against Telegram CloudStorage's per-key
@@ -583,7 +590,9 @@
         const candidateLocation = state.chunkMap.get(candidate.id);
         return candidateLocation && candidateLocation.setId === location.setId && candidateLocation.chunkIdx === location.chunkIdx;
       });
-      await state.store.saveChunk(location.setId, location.chunkIdx, chunkTerms);
+      await Promise.all([activityWrite, state.store.saveChunk(location.setId, location.chunkIdx, chunkTerms)]);
+    } else {
+      await activityWrite;
     }
   }
 
@@ -799,6 +808,10 @@
   }
 
   function showFeedback(feedback, isCorrect, correctAnswer, note) {
+    const card = feedback.closest('.exercise-card');
+    if (card) {
+      card.querySelectorAll('.exercise-hint, .hint-actions, .hint-btn').forEach((hint) => hint.remove());
+    }
     feedback.hidden = false;
     feedback.className = 'feedback ' + (isCorrect ? 'ok' : 'bad');
     feedback.innerHTML = isCorrect
@@ -909,12 +922,14 @@
 
     const face = document.createElement('div');
     face.className = 'flash-face';
+    face.setAttribute('role', 'button');
+    face.setAttribute('tabindex', '0');
     const promptText = document.createElement('div');
     promptText.className = 'exercise-prompt';
     promptText.textContent = exercise.prompt;
     const hint = document.createElement('div');
     hint.className = 'flash-hint';
-    hint.textContent = 'Нажми, чтобы посмотреть слово';
+    hint.textContent = 'Нажми, чтобы посмотреть перевод';
     face.appendChild(promptText);
     face.appendChild(hint);
     card.appendChild(face);
@@ -929,6 +944,12 @@
       answer.textContent = exercise.answer;
       face.appendChild(answer);
       showFlashButtons();
+    });
+    face.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        face.click();
+      }
     });
 
     function showFlashButtons() {
@@ -947,9 +968,15 @@
       const answerOnce = (isCorrect) => {
         if (state.session.answered) return;
         state.session.answered = true;
-        forgot.disabled = true; remember.disabled = true;
+        actions.remove();
         scoreTerm(exercise.termId, isCorrect);
-        advanceAfterAnswer(isCorrect);
+        const feedback = document.createElement('div');
+        feedback.className = `feedback ${isCorrect ? 'ok' : 'bad'}`;
+        feedback.textContent = isCorrect
+          ? `✓ Помню: ${exercise.prompt} — ${exercise.answer}`
+          : `Перевод: ${exercise.prompt} — ${exercise.answer}`;
+        card.appendChild(feedback);
+        appendContinueButton(card, () => advanceAfterAnswer(isCorrect));
       };
       forgot.addEventListener('click', () => answerOnce(false));
       remember.addEventListener('click', () => answerOnce(true));
@@ -1049,6 +1076,7 @@
     }
 
     function finishMatching() {
+      hintRow.remove();
       exercise.termIds.forEach((id) => scoreTerm(id, true));
       const note = document.createElement('div');
       note.className = 'feedback ok';
@@ -1087,6 +1115,7 @@
     const stats = computeStats(state.terms);
     const availableNow = state.terms.filter((term) => term.attempts > 0);
     const quickPoolSize = availableNow.length || state.terms.length;
+    renderStreak();
     renderReviewSizeControl();
     el.btnQuickReview.hidden = state.terms.length === 0;
     el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(quickPoolSize)}`;
@@ -1173,7 +1202,9 @@
   function renderProgress() {
     const stats = computeStats(state.terms);
     const remaining = stats.total - stats.learned;
+    const streak = Srs.currentStreak(state.activity);
     el.progressStats.innerHTML =
+      statTile(streak, 'Дней подряд') +
       statTile(stats.total, 'Всего слов') +
       statTile(stats.learned, 'Изучено') +
       statTile(remaining, 'Осталось') +
@@ -1214,6 +1245,18 @@
         </div>
       `;
     }).join('');
+  }
+
+  function renderStreak() {
+    const streak = Srs.currentStreak(state.activity);
+    const doneToday = state.activity.lastDay === Srs.localDay();
+    const lastTwoDigits = streak % 100;
+    const lastDigit = streak % 10;
+    const dayWord = lastTwoDigits >= 11 && lastTwoDigits <= 14 ? 'дней'
+      : lastDigit === 1 ? 'день' : lastDigit >= 2 && lastDigit <= 4 ? 'дня' : 'дней';
+    el.reviewStreak.innerHTML = `<span class="streak-icon" aria-hidden="true">✦</span>
+      <div><strong>${streak} ${dayWord} подряд</strong>
+      <span>${doneToday ? 'Сегодня уже занимались' : 'Ответь хотя бы на одно слово сегодня'}</span></div>`;
   }
 
   // ---------------------------------------------------------------------
@@ -1260,6 +1303,7 @@
       btnLearnEmptyToReview: $('#btnLearnEmptyToReview'),
 
       reviewStats: $('#reviewStats'),
+      reviewStreak: $('#reviewStreak'),
       btnQuickReview: $('#btnQuickReview'),
       reviewSize: $('#reviewSize'),
       reviewSizeValue: $('#reviewSizeValue'),
@@ -1405,6 +1449,7 @@
         : 'Локальный режим (без Telegram) — прогресс останется в этом браузере';
 
       state.settings = await state.store.getSettings();
+      state.activity = await state.store.getActivity();
       await refreshSetsList();
       state.activeSetId = await state.store.getActiveSetId();
     }
