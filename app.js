@@ -52,7 +52,7 @@
     chunkMap: new Map(),       // termId -> {setId, chunkIdx}, for cheap partial saves
     termMeta: new Map(),       // termId -> {setId, setName, language}
     settings: null,
-    activity: { lastDay: null, streak: 0, longest: 0 },
+    activity: { lastDay: null, streak: 0, longest: 0, dailyCount: 0, dailyGoal: 5 },
     screen: 'loading',       // loading | import | learn | review | progress
     importMode: 'first',    // 'first' (no sets yet) | 'add' (adding another set)
     session: {
@@ -63,10 +63,12 @@
     },
     reviewFilter: 'due',
     reviewSize: 10,
+    flashcards: { items: [], index: 0, revealed: false },
     editingTermId: null
   };
 
   let el = {}; // populated on DOMContentLoaded
+  let activityWriteQueue = Promise.resolve();
   const $ = (sel) => document.querySelector(sel);
   const SCREEN_TITLES = { learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Vocab', loading: 'Vocab' };
 
@@ -105,6 +107,13 @@
     } catch (e) { /* not fatal outside Telegram */ }
   }
 
+  function registerOfflineApp() {
+    if (!('serviceWorker' in navigator) || !/^https?:$/.test(location.protocol)) return;
+    navigator.serviceWorker.register('./sw.js').catch((error) => {
+      console.warn('Offline app registration failed', error);
+    });
+  }
+
   function confirmDialog(message) {
     const tg = window.Telegram && window.Telegram.WebApp;
     return new Promise((resolve) => {
@@ -127,6 +136,8 @@
   function applyTheme(theme) {
     const chosen = theme === 'dark' ? 'dark' : 'light';
     document.documentElement.dataset.theme = chosen;
+    const themeMeta = document.querySelector('meta[name="theme-color"]');
+    if (themeMeta) themeMeta.setAttribute('content', chosen === 'dark' ? '#0f151e' : '#f4f6f8');
     if (el.btnTheme) {
       el.btnTheme.dataset.theme = chosen;
       el.btnTheme.setAttribute('aria-label', chosen === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему');
@@ -215,8 +226,13 @@
     el.bottomnav.hidden = name === 'loading' || name === 'import';
     el.syncBadge.hidden = name === 'loading';
 
-    document.querySelectorAll('.nav-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.screen === name);
+    document.querySelectorAll('.nav-btn').forEach((btn, index) => {
+      const active = btn.dataset.screen === name;
+      btn.classList.toggle('active', active);
+      if (active) {
+        btn.setAttribute('aria-current', 'page');
+        el.bottomnav.style.setProperty('--nav-index', index);
+      } else btn.removeAttribute('aria-current');
     });
 
     if (name === 'learn') startLearnSession();
@@ -505,12 +521,45 @@
 
   function getTermById(id) { return state.terms.find((t) => t.id === id); }
 
+  function dailyGoal() {
+    return [5, 10, 20].includes(Number(state.activity.dailyGoal)) ? Number(state.activity.dailyGoal) : 5;
+  }
+
+  function answerWord(count) {
+    const lastTwo = count % 100;
+    const last = count % 10;
+    return lastTwo >= 11 && lastTwo <= 14 ? 'ответов' : last === 1 ? 'ответ' : last >= 2 && last <= 4 ? 'ответа' : 'ответов';
+  }
+
+  function renderDailyGoal() {
+    const goal = dailyGoal();
+    const count = Srs.currentDailyCount(state.activity);
+    const done = count >= goal;
+    const streak = Srs.currentStreak(state.activity);
+    el.dailyGoalCard.classList.toggle('completed', done);
+    el.dailyGoalCount.textContent = `${count} / ${goal}`;
+    el.dailyGoalMessage.textContent = done ? 'Цель выполнена. Отличная работа!' : `Осталось дать ${goal - count} ${answerWord(goal - count)}`;
+    el.dailyGoalFill.style.width = `${Math.min(100, count / goal * 100)}%`;
+    el.dailyGoalTrack.setAttribute('aria-valuemax', String(goal));
+    el.dailyGoalTrack.setAttribute('aria-valuenow', String(Math.min(count, goal)));
+    el.dailyStreakText.textContent = `${streak} дн.`;
+    el.dailyGoalSelect.value = String(goal);
+    el.dailyGoalSelectLabel.textContent = el.dailyGoalSelect.selectedOptions[0]?.textContent || '';
+  }
+
+  function saveActivity() {
+    const snapshot = { ...state.activity };
+    activityWriteQueue = activityWriteQueue.catch(() => {}).then(() => state.store.setActivity(snapshot));
+    return activityWriteQueue;
+  }
+
   function startLearnSession(customQueue) {
     const queue = customQueue || buildLearnQueue(state.terms);
     state.session.queue = queue;
     state.session.initialLength = Math.max(queue.length, 1);
     state.session.answered = false;
     state.session.pendingStudyTermId = null;
+    renderDailyGoal();
     renderLearnStep();
   }
 
@@ -574,12 +623,9 @@
     const term = getTermById(termId);
     if (!term) return;
     Srs.applyAnswer(term, isCorrect, state.settings.intervalsDays);
-    const nextActivity = Srs.recordPractice(state.activity);
-    let activityWrite = Promise.resolve();
-    if (nextActivity !== state.activity) {
-      state.activity = nextActivity;
-      activityWrite = state.store.setActivity(nextActivity);
-    }
+    state.activity = Srs.recordPractice(state.activity);
+    const activityWrite = saveActivity();
+    renderDailyGoal();
 
     // Persist just the one chunk this term lives in, not the whole set —
     // keeps writes small and fast against Telegram CloudStorage's per-key
@@ -1109,6 +1155,20 @@
     el.reviewSizeValue.value = String(state.terms.length ? value : 0);
     el.reviewSizeValue.textContent = String(state.terms.length ? value : 0);
     el.reviewSizeMax.textContent = String(state.terms.length);
+    el.reviewSize.style.setProperty('--range-progress', `${state.terms.length ? (max === 1 ? 100 : (value - 1) / (max - 1) * 100) : 0}%`);
+    el.reviewSize.setAttribute('aria-valuetext', `${state.terms.length ? value : 0} из ${state.terms.length} слов`);
+  }
+
+  function updateReviewSizeInput(rawValue) {
+    const max = Math.max(1, state.terms.length);
+    const raw = Math.max(1, Math.min(max, Number(rawValue) || 1));
+    state.reviewSize = Math.round(raw);
+    el.reviewSizeValue.value = String(state.reviewSize);
+    el.reviewSizeValue.textContent = String(state.reviewSize);
+    el.reviewSize.style.setProperty('--range-progress', `${max === 1 ? 100 : (raw - 1) / (max - 1) * 100}%`);
+    el.reviewSize.setAttribute('aria-valuetext', `${state.reviewSize} из ${state.terms.length} слов`);
+    const available = state.terms.filter((term) => term.attempts > 0).length;
+    el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(available || state.terms.length)}`;
   }
 
   function renderReview() {
@@ -1120,11 +1180,8 @@
     el.btnQuickReview.hidden = state.terms.length === 0;
     el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(quickPoolSize)}`;
     el.reviewStats.innerHTML =
-      statTile(stats.total, 'Всего') +
-      statTile(stats.new, 'Новые') +
       statTile(stats.learning, 'Учатся') +
       statTile(stats.dueToday, 'Сегодня') +
-      statTile(stats.learned, 'Изучено') +
       statTile(stats.successRate + '%', 'Точность');
 
     renderReviewList();
@@ -1196,10 +1253,54 @@
     startLearnSession(ids);
   }
 
+  function renderFlashcard() {
+    const { items, index, revealed } = state.flashcards;
+    const term = items[index];
+    if (!term) return;
+    el.flashcardPosition.textContent = `${index + 1} / ${items.length}`;
+    el.flashcardSource.textContent = termSourceLabel(term);
+    el.flashcardTerm.textContent = term.term;
+    el.flashcardTranslation.textContent = term.translation;
+    el.flashcardContext.textContent = term.context ? `«${term.context}»` : '';
+    el.flashcardReveal.hidden = revealed;
+    el.flashcardTranslation.hidden = !revealed;
+    el.flashcardContext.hidden = !revealed || !term.context;
+    el.flashcardFace.classList.toggle('revealed', revealed);
+    el.flashcardFace.setAttribute('aria-label', revealed ? 'Скрыть перевод' : 'Показать перевод');
+    el.btnPreviousFlashcard.disabled = index === 0;
+    el.btnNextFlashcard.textContent = index === items.length - 1 ? 'Готово' : 'Далее →';
+  }
+
+  function openFlashcards() {
+    if (!state.terms.length) return;
+    state.flashcards = { items: Ex.shuffle([...state.terms]), index: 0, revealed: false };
+    el.flashcardBackdrop.hidden = false;
+    $('#app').inert = true;
+    renderFlashcard();
+    el.btnCloseFlashcards.focus();
+  }
+
+  function closeFlashcards() {
+    if (el.flashcardBackdrop.hidden) return;
+    el.flashcardBackdrop.hidden = true;
+    $('#app').inert = false;
+    el.btnBrowseCards.focus();
+  }
+
+  function moveFlashcard(direction) {
+    const next = state.flashcards.index + direction;
+    if (next < 0) return;
+    if (next >= state.flashcards.items.length) { closeFlashcards(); return; }
+    state.flashcards.index = next;
+    state.flashcards.revealed = false;
+    renderFlashcard();
+  }
+
   // ---------------------------------------------------------------------
   // Progress screen
   // ---------------------------------------------------------------------
   function renderProgress() {
+    renderDailyGoal();
     const stats = computeStats(state.terms);
     const remaining = stats.total - stats.learned;
     const streak = Srs.currentStreak(state.activity);
@@ -1254,7 +1355,7 @@
     const lastDigit = streak % 10;
     const dayWord = lastTwoDigits >= 11 && lastTwoDigits <= 14 ? 'дней'
       : lastDigit === 1 ? 'день' : lastDigit >= 2 && lastDigit <= 4 ? 'дня' : 'дней';
-    el.reviewStreak.innerHTML = `<span class="streak-icon" aria-hidden="true">✦</span>
+    el.reviewStreak.innerHTML = `<span class="streak-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13.5 2.5c.1 3-1.4 4.2-1.5 6.6-1.3-1-1.8-2.7-1.7-3.8-3.6 2.4-5.4 5.2-5.4 8.6a7.1 7.1 0 0 0 14.2 0c0-4.5-2.7-7.7-5.6-11.4Z"/></svg></span>
       <div><strong>${streak} ${dayWord} подряд</strong>
       <span>${doneToday ? 'Сегодня уже занимались' : 'Ответь хотя бы на одно слово сегодня'}</span></div>`;
   }
@@ -1297,6 +1398,15 @@
       btnCancelImport: $('#btnCancelImport'),
       importErrors: $('#importErrors'),
       learnProgressFill: $('#learnProgressFill'),
+      dailyGoalCard: $('#dailyGoalCard'),
+      dailyGoalCount: $('#dailyGoalCount'),
+      dailyGoalMessage: $('#dailyGoalMessage'),
+      dailyGoalFill: $('#dailyGoalFill'),
+      dailyGoalTrack: $('#dailyGoalTrack'),
+      dailyStreak: $('#dailyStreak'),
+      dailyStreakText: $('#dailyStreakText'),
+      dailyGoalSelect: $('#dailyGoalSelect'),
+      dailyGoalSelectLabel: $('#dailyGoalSelectLabel'),
       learnCounter: $('#learnCounter'),
       exerciseCard: $('#exerciseCard'),
       learnEmpty: $('#learnEmpty'),
@@ -1305,6 +1415,7 @@
       reviewStats: $('#reviewStats'),
       reviewStreak: $('#reviewStreak'),
       btnQuickReview: $('#btnQuickReview'),
+      btnBrowseCards: $('#btnBrowseCards'),
       reviewSize: $('#reviewSize'),
       reviewSizeValue: $('#reviewSizeValue'),
       reviewSizeMax: $('#reviewSizeMax'),
@@ -1317,6 +1428,18 @@
       progressBarFill: $('#progressBarFill'),
       progressBarLabel: $('#progressBarLabel'),
       wordTable: $('#wordTable'),
+
+      flashcardBackdrop: $('#flashcardBackdrop'),
+      flashcardPosition: $('#flashcardPosition'),
+      flashcardSource: $('#flashcardSource'),
+      flashcardTerm: $('#flashcardTerm'),
+      flashcardReveal: $('#flashcardReveal'),
+      flashcardTranslation: $('#flashcardTranslation'),
+      flashcardContext: $('#flashcardContext'),
+      flashcardFace: $('#flashcardFace'),
+      btnCloseFlashcards: $('#btnCloseFlashcards'),
+      btnPreviousFlashcard: $('#btnPreviousFlashcard'),
+      btnNextFlashcard: $('#btnNextFlashcard'),
 
       surfaceBackdrop: $('#surfaceBackdrop'),
       surfaceTitle: $('#surfaceTitle'),
@@ -1370,6 +1493,12 @@
     el.btnEditLanguage.addEventListener('click', () => openSurface('language'));
     el.btnDeleteSet.addEventListener('click', deleteActiveSet);
     el.btnTheme.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+    el.dailyGoalSelect.addEventListener('change', async () => {
+      state.activity = { ...state.activity, dailyGoal: Number(el.dailyGoalSelect.value) };
+      renderDailyGoal();
+      try { await saveActivity(); }
+      catch (error) { console.error('Could not save daily goal', error); showToast('Не удалось сохранить цель'); }
+    });
     el.btnCloseSurface.addEventListener('click', closeSurface);
     el.addWordForm.addEventListener('submit', addWordManually);
     el.manualSetSelect.addEventListener('change', updateManualLanguageHint);
@@ -1378,10 +1507,30 @@
       if (event.target === el.surfaceBackdrop) closeSurface();
     });
     el.btnQuickReview.addEventListener('click', startQuickReview);
-    el.reviewSize.addEventListener('input', () => {
-      state.reviewSize = Math.max(1, Number(el.reviewSize.value) || 1);
+    el.btnBrowseCards.addEventListener('click', openFlashcards);
+    el.btnCloseFlashcards.addEventListener('click', closeFlashcards);
+    el.flashcardFace.addEventListener('click', () => {
+      state.flashcards.revealed = !state.flashcards.revealed;
+      renderFlashcard();
+    });
+    el.btnPreviousFlashcard.addEventListener('click', () => moveFlashcard(-1));
+    el.btnNextFlashcard.addEventListener('click', () => moveFlashcard(1));
+    el.flashcardBackdrop.addEventListener('click', (event) => {
+      if (event.target === el.flashcardBackdrop) closeFlashcards();
+    });
+    el.reviewSize.addEventListener('input', () => updateReviewSizeInput(el.reviewSize.value));
+    el.reviewSize.addEventListener('change', () => {
       try { localStorage.setItem('vocab_review_size', String(state.reviewSize)); } catch (e) { /* optional preference */ }
-      renderReview();
+    });
+    el.reviewSize.addEventListener('keydown', (event) => {
+      const delta = { ArrowLeft: -1, ArrowDown: -1, ArrowRight: 1, ArrowUp: 1 }[event.key];
+      if (delta === undefined && event.key !== 'Home' && event.key !== 'End') return;
+      event.preventDefault();
+      const next = event.key === 'Home' ? 1 : event.key === 'End'
+        ? Math.max(1, state.terms.length) : state.reviewSize + delta;
+      el.reviewSize.value = String(Math.max(1, Math.min(state.terms.length, next)));
+      updateReviewSizeInput(el.reviewSize.value);
+      try { localStorage.setItem('vocab_review_size', String(state.reviewSize)); } catch (e) { /* optional preference */ }
     });
     el.wordTable.addEventListener('click', (event) => {
       const button = event.target.closest('[data-edit-term]');
@@ -1405,6 +1554,14 @@
       }
     });
     document.addEventListener('keydown', (event) => {
+      if (!el.flashcardBackdrop.hidden) {
+        if (event.key === 'Escape') { closeFlashcards(); return; }
+        if (event.key === 'ArrowRight') { event.preventDefault(); moveFlashcard(1); return; }
+        if (event.key === 'ArrowLeft') { event.preventDefault(); moveFlashcard(-1); return; }
+        if (event.key === ' ' && event.target === el.flashcardBackdrop) {
+          event.preventDefault(); state.flashcards.revealed = !state.flashcards.revealed; renderFlashcard(); return;
+        }
+      }
       if (event.key === 'Escape') {
         closeSurface();
         el.setMenu.hidden = true;
@@ -1433,6 +1590,7 @@
     initReviewSize();
     wireEvents();
     initTelegram();
+    registerOfflineApp();
 
     const INIT_TIMEOUT_MS = 2000;
 

@@ -102,10 +102,16 @@
   function recordPractice(activity, today) {
     const previous = activity || {};
     const day = today || localDay();
-    if (previous.lastDay === day) return previous;
+    if (previous.lastDay === day) {
+      return { ...previous, dailyCount: (previous.dailyCount || 0) + 1 };
+    }
     const consecutive = dayDistance(previous.lastDay, day) === 1;
     const streak = consecutive ? (previous.streak || 0) + 1 : 1;
-    return { lastDay: day, streak, longest: Math.max(previous.longest || 0, streak) };
+    return { ...previous, lastDay: day, streak, longest: Math.max(previous.longest || 0, streak), dailyCount: 1 };
+  }
+
+  function currentDailyCount(activity, today) {
+    return activity && activity.lastDay === (today || localDay()) ? activity.dailyCount || 0 : 0;
   }
 
   function currentStreak(activity, today) {
@@ -124,6 +130,7 @@
     statusFor,
     localDay,
     recordPractice,
+    currentDailyCount,
     currentStreak
   };
 })(window);
