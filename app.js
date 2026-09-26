@@ -39,7 +39,7 @@
 
   const SESSION_SIZE = 10;
   const ALL_SETS_ID = '__all__';
-  const LANGUAGE_LABELS = { en: 'Английский', de: 'Немецкий', mixed: 'Смешанные' };
+  const LANGUAGE_LABELS = { en: 'Английский', de: 'Немецкий', es: 'Испанский', fr: 'Французский', it: 'Итальянский', pt: 'Португальский', zh: 'Китайский', ja: 'Японский', ko: 'Корейский', ar: 'Арабский', hi: 'Хинди', ru: 'Русский', mixed: 'Смешанные' };
 
   // ---------------------------------------------------------------------
   // State
@@ -53,7 +53,7 @@
     termMeta: new Map(),       // termId -> {setId, setName, language}
     settings: null,
     activity: { lastDay: null, streak: 0, longest: 0, dailyCount: 0, dailyGoal: 5 },
-    screen: 'loading',       // loading | import | learn | review | progress
+    screen: 'loading',       // loading | import | home | learn | review | progress
     importMode: 'first',    // 'first' (no sets yet) | 'add' (adding another set)
     session: {
       queue: [],
@@ -70,7 +70,7 @@
   let el = {}; // populated on DOMContentLoaded
   let activityWriteQueue = Promise.resolve();
   const $ = (sel) => document.querySelector(sel);
-  const SCREEN_TITLES = { learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Vocab', loading: 'Vocab' };
+  const SCREEN_TITLES = { home: 'Vocab', learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Vocab', loading: 'Vocab' };
 
   // ---------------------------------------------------------------------
   // Telegram WebApp integration
@@ -114,12 +114,22 @@
     });
   }
 
+  let confirmResolve = null;
   function confirmDialog(message) {
-    const tg = window.Telegram && window.Telegram.WebApp;
-    return new Promise((resolve) => {
-      if (tg && tg.showConfirm) tg.showConfirm(message, (ok) => resolve(ok));
-      else resolve(window.confirm(message));
-    });
+    el.confirmMessage.textContent = message;
+    el.confirmBackdrop.hidden = false;
+    $('#app').inert = true;
+    el.btnConfirmCancel.focus();
+    return new Promise((resolve) => { confirmResolve = resolve; });
+  }
+
+  function closeConfirm(ok) {
+    if (!confirmResolve) return;
+    el.confirmBackdrop.hidden = true;
+    $('#app').inert = false;
+    const resolve = confirmResolve;
+    confirmResolve = null;
+    resolve(ok);
   }
 
   // ---------------------------------------------------------------------
@@ -187,13 +197,33 @@
   }
 
   function languageLabel(language) {
-    return LANGUAGE_LABELS[language] || LANGUAGE_LABELS.mixed;
+    return LANGUAGE_LABELS[language] || language || LANGUAGE_LABELS.mixed;
+  }
+
+  function setCreationTime(set) {
+    const date = new Date(set.createdAt);
+    return Number.isFinite(date.getTime()) ? date.getTime() : 0;
   }
 
   function termSourceLabel(term) {
     const meta = state.termMeta.get(term.id);
     if (!meta) return '';
     return `${languageLabel(meta.language)} · ${meta.setName}`;
+  }
+
+  function normalizeStoredTerm(term) {
+    // Older/imported records can have missing SRS fields; keep their id and
+    // progress, but make every render path safe to use.
+    term.term = String(term.term ?? term.word ?? term.front ?? '');
+    term.translation = String(term.translation ?? term.definition ?? term.back ?? '');
+    term.context = String(term.context ?? '');
+    term.attempts = Number.isFinite(Number(term.attempts)) ? Math.max(0, Number(term.attempts)) : 0;
+    term.correct_count = Number.isFinite(Number(term.correct_count)) ? Math.max(0, Number(term.correct_count)) : 0;
+    term.mastery_level = Number.isFinite(Number(term.mastery_level)) ? Math.max(0, Number(term.mastery_level)) : 0;
+    term.due_date = Number.isFinite(Number(term.due_date)) ? Number(term.due_date) : Date.now();
+    term.created_at = Number.isFinite(Number(term.created_at)) ? Number(term.created_at) : Date.now();
+    if (!['new', 'learning', 'learned'].includes(term.status)) term.status = term.attempts ? 'learning' : 'new';
+    return term;
   }
 
   // ---------------------------------------------------------------------
@@ -220,11 +250,14 @@
     if (name !== 'loading' && el.screens.loading) el.screens.loading.hidden = true;
 
     el.mainHeader.hidden = name === 'loading';
-    el.topbarTitle.hidden = name !== 'import';
+    el.mainHeader.dataset.screen = name;
+    el.topbarTitle.hidden = !['home', 'import', 'learn'].includes(name);
     el.topbarTitle.textContent = SCREEN_TITLES[name];
-    el.setSwitch.hidden = name === 'loading' || name === 'import' || state.sets.length === 0;
-    el.bottomnav.hidden = name === 'loading' || name === 'import';
-    el.syncBadge.hidden = name === 'loading';
+    el.btnBackHome.hidden = name !== 'learn';
+    el.btnTheme.hidden = name === 'learn';
+    el.setSwitch.hidden = name === 'loading' || name === 'import' || name === 'home' || name === 'learn' || state.sets.length === 0;
+    el.bottomnav.hidden = name === 'loading' || name === 'import' || name === 'learn';
+    el.syncBadge.hidden = name === 'loading' || name === 'learn';
 
     document.querySelectorAll('.nav-btn').forEach((btn, index) => {
       const active = btn.dataset.screen === name;
@@ -235,6 +268,7 @@
       } else btn.removeAttribute('aria-current');
     });
 
+    if (name === 'home') renderHome();
     if (name === 'learn') startLearnSession();
     if (name === 'review') renderReview();
     if (name === 'progress') renderProgress();
@@ -244,8 +278,9 @@
   // Set switcher (header dropdown + add/delete)
   // ---------------------------------------------------------------------
   function renderSetSwitcher() {
-    const groups = { en: [], de: [], mixed: [] };
-    state.sets.forEach((set) => (groups[set.language] || groups.mixed).push(set));
+    const groups = {};
+    [...state.sets].sort((a, b) => setCreationTime(b) - setCreationTime(a))
+      .forEach((set) => (groups[set.language || 'mixed'] ||= []).push(set));
     let html = state.sets.length > 1
       ? `<option value="${ALL_SETS_ID}" ${state.activeSetId === ALL_SETS_ID ? 'selected' : ''}>Все наборы (${state.sets.reduce((sum, set) => sum + (set.termCount || 0), 0)})</option>`
       : '';
@@ -269,7 +304,7 @@
     await state.store.setActiveSetId(setId);
     await loadActiveSetTerms();
     renderSetSwitcher();
-    if (state.screen === 'learn' || state.screen === 'review' || state.screen === 'progress') {
+    if (state.screen === 'home' || state.screen === 'learn' || state.screen === 'review' || state.screen === 'progress') {
       showScreen(state.screen);
     }
   }
@@ -294,7 +329,8 @@
     bundles.forEach(({ set, data }) => {
       const setLanguage = set.language || inferSetLanguage(data.terms);
       set.language = setLanguage;
-      data.terms.forEach((term) => {
+      data.terms.forEach((rawTerm) => {
+        const term = normalizeStoredTerm(rawTerm);
         const language = setLanguage === 'mixed' ? detectTermLanguage(term.term, term.context) : setLanguage;
         state.terms.push(term);
         state.chunkMap.set(term.id, { setId: set.id, chunkIdx: data.chunkMap.get(term.id) });
@@ -307,15 +343,52 @@
     state.sets = await state.store.listSets();
   }
 
+  function renderHome() {
+    renderDailyGoal();
+    const sortedSets = [...state.sets].sort((a, b) => setCreationTime(b) - setCreationTime(a));
+    const allSets = state.sets.length > 1 ? `
+      <div class="home-set-card">
+        <button class="home-set-open" type="button" data-open-set="${ALL_SETS_ID}">
+          <span class="home-set-language">ОБЩЕЕ ЗАНЯТИЕ</span>
+          <strong>Все наборы</strong>
+          <span>${state.sets.reduce((count, set) => count + (Number(set.termCount) || 0), 0)} слов · Начать занятие</span>
+        </button>
+      </div>
+    ` : '';
+    el.homeSetList.innerHTML = allSets + sortedSets.map((set) => `
+      <div class="home-set-card">
+        <button class="home-set-open" type="button" data-open-set="${escapeHtml(set.id)}">
+          <span class="home-set-language">${escapeHtml(languageLabel(set.language))}</span>
+          <strong>${escapeHtml(set.name)}</strong>
+          <span>${Number(set.termCount) || 0} слов · Начать занятие</span>
+          <span class="home-set-created">${setCreationTime(set) ? `Добавлен ${escapeHtml(new Date(set.createdAt).toLocaleDateString('ru-RU'))}` : 'Дата добавления неизвестна'}</span>
+        </button>
+        <button class="home-set-delete" type="button" data-delete-set="${escapeHtml(set.id)}" aria-label="Удалить набор ${escapeHtml(set.name)}">Удалить</button>
+      </div>
+    `).join('');
+  }
+
+  function updateOtherLanguage(select, input) {
+    input.hidden = select.value !== 'other';
+    input.required = select.value === 'other';
+    if (!input.hidden) input.focus();
+  }
+
+  function selectedLanguage(select, input) {
+    return select.value === 'other' ? input.value.trim() : select.value;
+  }
+
   function openImportScreen(mode) {
     state.importMode = mode;
     el.importTitle.textContent = mode === 'add' ? 'Новый набор слов' : 'Учить слова стало проще';
     el.importSubtitle.textContent = mode === 'add'
       ? 'Загрузи CSV-файл для ещё одного набора — он появится в списке рядом с остальными.'
-      : 'Загрузи CSV-файл со словами и фразами на английском или немецком — приложение построит для тебя карточки и расписание повторений.';
+      : 'Загрузи CSV-файл со словами и фразами — приложение построит для тебя карточки и расписание повторений.';
     el.btnCancelImport.hidden = mode !== 'add';
     el.setNameInput.value = '';
     el.setLanguageSelect.value = 'auto';
+    el.setLanguageOther.value = '';
+    updateOtherLanguage(el.setLanguageSelect, el.setLanguageOther);
     el.importErrors.hidden = true;
     el.importErrors.innerHTML = '';
     showScreen('import');
@@ -362,8 +435,9 @@
 
     const name = (el.setNameInput.value || '').trim() || defaultName;
     const terms = items.map((it) => Srs.makeTerm(it));
-    const selectedLanguage = el.setLanguageSelect.value;
-    const language = selectedLanguage === 'auto' ? inferSetLanguage(terms) : selectedLanguage;
+    const chosenLanguage = selectedLanguage(el.setLanguageSelect, el.setLanguageOther);
+    if (!chosenLanguage) { el.setLanguageOther.reportValidity(); return; }
+    const language = chosenLanguage === 'auto' ? inferSetLanguage(terms) : chosenLanguage;
     const newId = await state.store.createSet(name, terms, language);
 
     await refreshSetsList();
@@ -371,7 +445,7 @@
     await loadActiveSetTerms();
     renderSetSwitcher();
 
-    showScreen('learn');
+    showScreen('home');
     const missingArticles = language === 'de'
       ? terms.filter((term) => isLikelyGermanNounWithoutArticle(term.term)).length
       : 0;
@@ -427,7 +501,11 @@
     if (!set) return closeSurface();
     el.surfaceTitle.textContent = 'Язык набора';
     el.setLanguageHint.textContent = `Выбери язык для набора «${set.name}». Слова автоматически переместятся в соответствующую группу.`;
-    el.editLanguageSelect.value = set.language || 'mixed';
+    const language = set.language || 'mixed';
+    const known = [...el.editLanguageSelect.options].some((option) => option.value === language);
+    el.editLanguageSelect.value = known ? language : 'other';
+    el.editLanguageOther.value = known ? '' : language;
+    updateOtherLanguage(el.editLanguageSelect, el.editLanguageOther);
     setTimeout(() => el.editLanguageSelect.focus(), 60);
   }
 
@@ -477,10 +555,13 @@
   async function changeSetLanguage(event) {
     event.preventDefault();
     if (!state.activeSetId || state.activeSetId === ALL_SETS_ID) return;
-    await state.store.updateSetLanguage(state.activeSetId, el.editLanguageSelect.value);
+    const language = selectedLanguage(el.editLanguageSelect, el.editLanguageOther);
+    if (!language) { el.editLanguageOther.reportValidity(); return; }
+    await state.store.updateSetLanguage(state.activeSetId, language);
     await refreshSetsList();
     await loadActiveSetTerms();
     renderSetSwitcher();
+    if (state.screen === 'home') renderHome();
     closeSurface();
     showToast('Язык набора изменён');
   }
@@ -590,6 +671,10 @@
       renderLearnStep();
       return;
     }
+    if (!String(term.term || '').trim() || !String(term.translation || '').trim()) {
+      renderUnavailableCard(el.exerciseCard, 'У этого слова не хватает текста или перевода. Проверь его в разделе «Прогресс».');
+      return;
+    }
 
     // Phase 1: never-attempted words get a Study card before any test.
     if (term.attempts === 0) {
@@ -609,8 +694,29 @@
     }
 
     state.session.answered = false;
-    const exercise = prepareExercise(Ex.pickExerciseType(term, state.terms), term);
-    renderExercise(exercise);
+    try {
+      const exercise = prepareExercise(Ex.pickExerciseType(term, state.terms), term);
+      renderExercise(exercise);
+    } catch (error) {
+      console.error('Could not render exercise', error, term.id);
+      renderUnavailableCard(el.exerciseCard, 'Не удалось показать это задание. Можно пропустить карточку и проверить слово в «Прогрессе».');
+    }
+  }
+
+  function renderUnavailableCard(card, message) {
+    card.innerHTML = '';
+    const heading = document.createElement('h2');
+    heading.className = 'unavailable-heading';
+    heading.textContent = 'Не удалось показать карточку';
+    const details = document.createElement('p');
+    details.className = 'muted';
+    details.textContent = message;
+    const skip = document.createElement('button');
+    skip.type = 'button';
+    skip.className = 'btn btn-ghost';
+    skip.textContent = 'Пропустить';
+    skip.addEventListener('click', () => { state.session.queue.shift(); renderLearnStep(); });
+    card.append(heading, details, skip);
   }
 
   function advanceAfterAnswer(isCorrect) {
@@ -655,6 +761,10 @@
   function renderStudyCard(term) {
     const card = el.exerciseCard;
     card.innerHTML = '';
+    if (!String(term?.term || '').trim() || !String(term?.translation || '').trim()) {
+      renderUnavailableCard(card, 'У этого слова не хватает текста или перевода.');
+      return;
+    }
 
     const badge = document.createElement('div');
     badge.className = 'phase-badge';
@@ -757,6 +867,11 @@
     const card = el.exerciseCard;
     card.innerHTML = '';
 
+    if (!exercise || !String(exercise.correctAnswer || exercise.answer || '').trim()) {
+      renderUnavailableCard(card, 'У задания нет ответа. Проверь запись слова в «Прогрессе».');
+      return;
+    }
+
     const kindEl = document.createElement('div');
     kindEl.className = 'exercise-kind';
     kindEl.textContent = exercise.kindLabel;
@@ -766,7 +881,7 @@
     if (exerciseTerm) appendTermSource(card, exerciseTerm);
 
     if (exercise.kind === 'flashcard') {
-      renderFlashcard(card, exercise);
+      renderExerciseFlashcard(card, exercise);
       return;
     }
 
@@ -775,7 +890,7 @@
     promptLabel.textContent = exercise.promptLabel;
     card.appendChild(promptLabel);
 
-    if (exercise.prompt) {
+    if (exercise.prompt && exercise.kind !== 'spelling_missing') {
       const promptRow = document.createElement('div');
       promptRow.className = 'term-heading-row';
       const prompt = document.createElement('div');
@@ -816,7 +931,12 @@
       return;
     }
 
-    if (exercise.kind === 'type_answer' || exercise.kind === 'spelling_missing') {
+    if (exercise.kind === 'spelling_missing') {
+      renderMissingLetters(card, exercise, feedback);
+      return;
+    }
+
+    if (exercise.kind === 'type_answer') {
       const input = document.createElement('input');
       input.className = 'text-input';
       input.type = 'text';
@@ -840,6 +960,78 @@
       renderScramble(card, exercise, feedback);
       return;
     }
+  }
+
+  function renderMissingLetters(card, exercise, feedback) {
+    const word = Array.from(exercise.correctAnswer || '');
+    const missing = new Set(exercise.missingPositions || []);
+    const line = document.createElement('div');
+    line.className = 'spelling-line';
+    line.setAttribute('aria-label', 'Вставь пропущенные буквы');
+    const inputs = [];
+    let group = document.createElement('span');
+    group.className = 'spelling-word';
+    const appendGroup = () => { if (group.childNodes.length) line.appendChild(group); group = document.createElement('span'); group.className = 'spelling-word'; };
+    word.forEach((char, index) => {
+      if (/\s/.test(char)) { appendGroup(); return; }
+      if (!missing.has(index)) {
+        const letter = document.createElement('span');
+        letter.className = 'spelling-letter';
+        letter.textContent = char;
+        group.appendChild(letter);
+        return;
+      }
+      const input = document.createElement('input');
+      input.className = 'spelling-box';
+      input.type = 'text';
+      input.maxLength = 1;
+      input.autocomplete = 'off';
+      input.autocapitalize = 'off';
+      input.spellcheck = false;
+      input.setAttribute('aria-label', `Пропущенная буква ${inputs.length + 1}`);
+      inputs.push({ index, input });
+      group.appendChild(input);
+    });
+    appendGroup();
+    if (!inputs.length) {
+      renderUnavailableCard(card, 'В этом слове нет букв для заполнения.');
+      return;
+    }
+    card.appendChild(line);
+    card.appendChild(feedback);
+    const actions = buildActionsRow((button) => revealTextHint(card, exercise, button));
+    const checkBtn = actions.querySelector('.btn-primary');
+    const check = () => {
+      const answer = word.map((char, index) => inputs.find((item) => item.index === index)?.input.value || (missing.has(index) ? '' : char)).join('');
+      handleTypedAnswer(answer, exercise, inputs.map((item) => item.input), feedback, checkBtn);
+    };
+    checkBtn.addEventListener('click', check);
+    inputs.forEach(({ input }, position) => {
+      input.addEventListener('input', (event) => {
+        if (event.isComposing) return;
+        input.value = Array.from(input.value).slice(-1).join('');
+        if (input.value && position < inputs.length - 1) inputs[position + 1].input.focus();
+        if (inputs.every((item) => item.input.value)) checkBtn.click();
+      });
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Backspace' && !input.value && position > 0) {
+          event.preventDefault();
+          inputs[position - 1].input.focus();
+          inputs[position - 1].input.value = '';
+        }
+        if (event.key === 'Enter') { event.preventDefault(); checkBtn.click(); }
+      });
+      input.addEventListener('paste', (event) => {
+        const letters = Array.from(event.clipboardData?.getData('text') || '').filter((char) => !/\s/.test(char));
+        if (!letters.length) return;
+        event.preventDefault();
+        letters.forEach((letter, offset) => { if (inputs[position + offset]) inputs[position + offset].input.value = letter; });
+        if (inputs.every((item) => item.input.value)) checkBtn.click();
+        else inputs[Math.min(position + letters.length, inputs.length - 1)].input.focus();
+      });
+    });
+    card.appendChild(actions);
+    setTimeout(() => inputs[0].input.focus(), 50);
   }
 
   function buildActionsRow(onHint) {
@@ -893,7 +1085,7 @@
     if (state.session.answered) return;
     state.session.answered = true;
     const isCorrect = Ex.answersMatch(value, exercise.correctAnswer, { language: exercise.answerLanguage });
-    input.disabled = true;
+    (Array.isArray(input) ? input : [input]).forEach((field) => { field.disabled = true; });
     checkBtn.remove();
     showFeedback(feedback, isCorrect, exercise.correctAnswer,
       !isCorrect && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
@@ -960,7 +1152,7 @@
     card.appendChild(hintRow);
   }
 
-  function renderFlashcard(card, exercise) {
+  function renderExerciseFlashcard(card, exercise) {
     const promptLabel = document.createElement('div');
     promptLabel.className = 'exercise-prompt-label';
     promptLabel.textContent = exercise.promptLabel;
@@ -1367,6 +1559,7 @@
   function cacheDom() {
     el = {
       mainHeader: $('#mainHeader'),
+      btnBackHome: $('#btnBackHome'),
       topbarTitle: $('#topbarTitle'),
       setSwitch: $('#setSwitch'),
       setSelect: $('#setSelect'),
@@ -1382,6 +1575,7 @@
       screens: {
         loading: $('#screen-loading'),
         import: $('#screen-import'),
+        home: $('#screen-home'),
         learn: $('#screen-learn'),
         review: $('#screen-review'),
         progress: $('#screen-progress')
@@ -1392,6 +1586,7 @@
       importSubtitle: $('#importSubtitle'),
       setNameInput: $('#setNameInput'),
       setLanguageSelect: $('#setLanguageSelect'),
+      setLanguageOther: $('#setLanguageOther'),
       fileInput: $('#fileInput'),
       dropzone: $('#dropzone'),
       btnLoadDemo: $('#btnLoadDemo'),
@@ -1407,6 +1602,8 @@
       dailyStreakText: $('#dailyStreakText'),
       dailyGoalSelect: $('#dailyGoalSelect'),
       dailyGoalSelectLabel: $('#dailyGoalSelectLabel'),
+      homeSetList: $('#homeSetList'),
+      btnHomeAddSet: $('#btnHomeAddSet'),
       learnCounter: $('#learnCounter'),
       exerciseCard: $('#exerciseCard'),
       learnEmpty: $('#learnEmpty'),
@@ -1454,15 +1651,92 @@
       setLanguageForm: $('#setLanguageForm'),
       setLanguageHint: $('#setLanguageHint'),
       editLanguageSelect: $('#editLanguageSelect'),
+      editLanguageOther: $('#editLanguageOther'),
 
-      toast: $('#toast')
+      toast: $('#toast'),
+      confirmBackdrop: $('#confirmBackdrop'),
+      confirmMessage: $('#confirmMessage'),
+      btnConfirmCancel: $('#btnConfirmCancel'),
+      btnConfirmDelete: $('#btnConfirmDelete')
     };
   }
 
   function wireEvents() {
+    let setSwipe = null;
+    let suppressSetOpenUntil = 0;
     document.querySelectorAll('.nav-btn').forEach((btn) => {
       btn.addEventListener('click', () => showScreen(btn.dataset.screen));
     });
+    el.btnBackHome.addEventListener('click', () => showScreen('home'));
+    el.btnHomeAddSet.addEventListener('click', () => openImportScreen('add'));
+    el.homeSetList.addEventListener('pointerdown', (event) => {
+      const card = event.target.closest('.home-set-card');
+      if (!card || event.target.closest('.home-set-delete')) return;
+      setSwipe = { card, x: event.clientX, y: event.clientY, dragging: false, wasRevealed: card.classList.contains('revealed') };
+    });
+    el.homeSetList.addEventListener('pointermove', (event) => {
+      if (!setSwipe) return;
+      const { card, x, y } = setSwipe;
+      const dx = event.clientX - x;
+      const dy = event.clientY - y;
+      if (!setSwipe.dragging && (Math.abs(dx) < 7 || Math.abs(dx) < Math.abs(dy) * 1.3)) return;
+      setSwipe.dragging = true;
+      const start = card.classList.contains('revealed') ? -92 : 0;
+      const offset = Math.max(-card.clientWidth, Math.min(0, start + dx));
+      const open = card.querySelector('.home-set-open');
+      open.style.transition = 'none';
+      open.style.transform = `translateX(${offset}px)`;
+    });
+    el.homeSetList.addEventListener('pointerup', (event) => {
+      if (!setSwipe) return;
+      const { card, x, y, dragging, wasRevealed } = setSwipe;
+      setSwipe = null;
+      const dx = event.clientX - x;
+      const dy = event.clientY - y;
+      if (!dragging || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+      const open = card.querySelector('.home-set-open');
+      open.style.transition = '';
+      open.style.transform = '';
+      el.homeSetList.querySelectorAll('.home-set-card.revealed').forEach((item) => item.classList.remove('revealed'));
+      suppressSetOpenUntil = performance.now() + 500;
+      const deleteButton = card.querySelector('[data-delete-set]');
+      if (deleteButton && dx < -card.clientWidth * 0.65) {
+        card.classList.add('full-swiped');
+        setTimeout(async () => {
+          await deleteActiveSet(deleteButton.dataset.deleteSet);
+          if (card.isConnected) card.classList.remove('full-swiped');
+        }, 300);
+      } else if (deleteButton && (dx < -35 || (wasRevealed && dx < 35))) card.classList.add('revealed');
+    });
+    el.homeSetList.addEventListener('pointercancel', () => {
+      if (setSwipe) {
+        const open = setSwipe.card.querySelector('.home-set-open');
+        open.style.transition = '';
+        open.style.transform = '';
+      }
+      setSwipe = null;
+    });
+    el.homeSetList.addEventListener('click', async (event) => {
+      const deleteButton = event.target.closest('[data-delete-set]');
+      if (deleteButton) { await deleteActiveSet(deleteButton.dataset.deleteSet); return; }
+      const openButton = event.target.closest('[data-open-set]');
+      if (!openButton) return;
+      if (performance.now() < suppressSetOpenUntil) return;
+      const card = openButton.closest('.home-set-card');
+      if (card.classList.contains('revealed')) { card.classList.remove('revealed'); return; }
+      if (state.activeSetId !== openButton.dataset.openSet) await switchActiveSet(openButton.dataset.openSet);
+      showScreen('learn');
+    });
+    el.homeSetList.addEventListener('focusin', (event) => {
+      if (event.target.matches('.home-set-delete')) event.target.closest('.home-set-card').classList.add('revealed');
+    });
+    el.btnConfirmCancel.addEventListener('click', () => closeConfirm(false));
+    el.btnConfirmDelete.addEventListener('click', () => closeConfirm(true));
+    el.confirmBackdrop.addEventListener('click', (event) => {
+      if (event.target === el.confirmBackdrop) closeConfirm(false);
+    });
+    el.setLanguageSelect.addEventListener('change', () => updateOtherLanguage(el.setLanguageSelect, el.setLanguageOther));
+    el.editLanguageSelect.addEventListener('change', () => updateOtherLanguage(el.editLanguageSelect, el.editLanguageOther));
 
     el.fileInput.addEventListener('change', async (ev) => {
       const file = ev.target.files && ev.target.files[0];
@@ -1480,7 +1754,7 @@
     el.btnLoadDemo.addEventListener('click', () => handleCsvText(DEMO_CSV, 'Демо-набор'));
 
     el.btnCancelImport.addEventListener('click', () => {
-      showScreen(state.terms.length ? 'learn' : 'import');
+      showScreen(state.sets.length ? 'home' : 'import');
     });
 
     el.setSelect.addEventListener('change', (e) => switchActiveSet(e.target.value));
@@ -1491,7 +1765,7 @@
     el.btnAddSet.addEventListener('click', () => openImportScreen('add'));
     el.btnAddWord.addEventListener('click', () => openSurface('word'));
     el.btnEditLanguage.addEventListener('click', () => openSurface('language'));
-    el.btnDeleteSet.addEventListener('click', deleteActiveSet);
+    el.btnDeleteSet.addEventListener('click', () => deleteActiveSet());
     el.btnTheme.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
     el.dailyGoalSelect.addEventListener('change', async () => {
       state.activity = { ...state.activity, dailyGoal: Number(el.dailyGoalSelect.value) };
@@ -1563,6 +1837,7 @@
         }
       }
       if (event.key === 'Escape') {
+        if (!el.confirmBackdrop.hidden) { closeConfirm(false); return; }
         closeSurface();
         el.setMenu.hidden = true;
       }
@@ -1570,18 +1845,28 @@
     window.addEventListener('resize', () => positionReviewIndicator(el.reviewTabs.querySelector('.tab.active')));
   }
 
-  async function deleteActiveSet() {
-    if (!state.activeSetId || state.activeSetId === ALL_SETS_ID) return;
-    const setName = (state.sets.find((s) => s.id === state.activeSetId) || {}).name || 'этот набор';
+  async function deleteActiveSet(setId = state.activeSetId) {
+    if (!setId || setId === ALL_SETS_ID) return;
+    const setName = (state.sets.find((s) => s.id === setId) || {}).name || 'этот набор';
     const ok = await confirmDialog(`Удалить набор «${setName}» и весь его прогресс?`);
     if (!ok) return;
-    await state.store.deleteSet(state.activeSetId);
-    await refreshSetsList();
-    state.activeSetId = await state.store.getActiveSetId();
-    await loadActiveSetTerms();
-    renderSetSwitcher();
-    if (state.sets.length === 0) openImportScreen('first');
-    else showScreen('learn');
+    try {
+      if (!await state.store.deleteSet(setId)) throw new Error('Delete failed');
+      await refreshSetsList();
+      state.activeSetId = await state.store.getActiveSetId();
+      if (!state.sets.some((set) => set.id === state.activeSetId)) {
+        state.activeSetId = state.sets[0]?.id || null;
+        await state.store.setActiveSetId(state.activeSetId || '');
+      }
+      await loadActiveSetTerms();
+      renderSetSwitcher();
+      if (state.sets.length === 0) openImportScreen('first');
+      else showScreen('home');
+      showToast(`Набор «${setName}» удалён`);
+    } catch (error) {
+      console.error('Could not delete set', error);
+      showToast('Не удалось удалить набор. Попробуй ещё раз.');
+    }
   }
 
   async function boot() {
@@ -1658,7 +1943,7 @@
     }
 
     renderSetSwitcher();
-    showScreen('learn');
+    showScreen('home');
   }
 
   document.addEventListener('DOMContentLoaded', boot);

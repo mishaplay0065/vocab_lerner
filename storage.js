@@ -246,13 +246,15 @@
       const entry = sets.find((s) => s.id === id);
       if (!entry) return false;
       const keys = Array.from({ length: entry.chunkCount }, (_, i) => `s_${id}_${i}`);
-      await this.backend.removeItems(keys);
       const remaining = sets.filter((s) => s.id !== id);
-      await this._saveSetsIndex(remaining);
+      // The index is authoritative. Keep the word chunks intact if updating
+      // it fails, so a failed deletion cannot leave a visible empty set.
+      if (!await this._saveSetsIndex(remaining)) return false;
       const active = await this.getActiveSetId();
       if (active === id) {
         await this.setActiveSetId(remaining.length ? remaining[0].id : '');
       }
+      if (!await this.backend.removeItems(keys)) console.warn('Deleted set chunks could not be cleaned up', id);
       return true;
     }
 
@@ -276,7 +278,12 @@
         if (!raw) return;
         let chunk = [];
         try { chunk = JSON.parse(raw); } catch { chunk = []; }
-        chunk.forEach((t) => { terms.push(t); chunkMap.set(t.id, idx); });
+        if (!Array.isArray(chunk)) return;
+        chunk.forEach((t) => {
+          if (!t || typeof t !== 'object' || !t.id) return;
+          terms.push(t);
+          chunkMap.set(t.id, idx);
+        });
       });
 
       return { terms, chunkMap, chunkCount: entry.chunkCount };

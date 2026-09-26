@@ -197,6 +197,7 @@
       kindLabel: 'Вставь пропущенные буквы',
       promptLabel: term.translation,
       prompt: display,
+      missingPositions: [...hidden].sort((a, b) => a - b),
       context: term.context,
       correctAnswer: word,
       answerSide: 'term',
@@ -233,6 +234,7 @@
 
   function buildSpelling(term) {
     const word = term.term.trim();
+    if (!/[a-zA-Zа-яёА-ЯЁäöüßÄÖÜ]/.test(word)) return buildSpellingScramble(term);
     // Very short single words are easier to scramble than to blank out.
     if (word.length <= 3 && !word.includes(' ')) return buildSpellingScramble(term);
     return Math.random() < 0.5 ? buildSpellingMissingLetters(term) : buildSpellingScramble(term);
