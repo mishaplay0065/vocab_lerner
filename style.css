@@ -1861,9 +1861,17 @@ body::before{display:none;}
 .btn-danger{background:#7d3745;color:#fff;}
 .btn-danger:active{background:#612a35;}
 #screen-learn{padding-top:20px;}
-#screen-learn .learn-progressbar,#screen-learn .learn-counter{display:none;}
+#screen-learn .learn-progressbar{display:block;height:6px;margin:0 0 12px;}
+#screen-learn .learn-counter{display:block;margin:0 0 22px;text-align:center;font-variant-numeric:tabular-nums;color:var(--ink-soft);}
 #screen-learn .exercise-card{margin-top:10px;}
 .unavailable-heading{margin:0;font:700 21px/1.2 var(--font-display);}
+.save-notice{padding:16px;border:1px solid var(--border);border-radius:16px;background:var(--surface);color:var(--ink);display:grid;gap:10px;font-size:14px;line-height:1.5;}
+.restart-learn{align-self:center;font-size:12px;min-height:36px;}
+.language-auto-note{font-size:12px;line-height:1.5;}
+#loadingError{max-width:440px;padding:20px;line-height:1.5;color:var(--ink);}
+button.letter-tile,button.match-cell{font-family:var(--font-body);color:var(--ink);}
+.dropzone:focus-visible,button.match-cell:focus-visible,button.letter-tile:focus-visible{outline:2px solid var(--accent);outline-offset:3px;}
+:root[data-theme="dark"] .exercise-kind,:root[data-theme="dark"] .home-set-language{color:var(--accent);}
 .spelling-line{display:flex;flex-wrap:wrap;align-items:center;gap:8px 13px;min-width:0;max-width:100%;}
 .spelling-word{display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px;max-width:100%;}
 .spelling-letter,.spelling-box{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:27px;height:38px;text-align:center;font:650 21px/1 var(--font-display);}

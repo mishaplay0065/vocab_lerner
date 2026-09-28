@@ -1,364 +1,216 @@
-/**
- * storage.js
- * -----------------------------------------------------------------------
- * Two layers:
- *
- *   1. A low-level key/value backend (Promise-based get/set/remove) —
- *      either Telegram.WebApp.CloudStorage (for cross-device sync) or
- *      localStorage (fallback for local browser testing / when the app
- *      is opened outside Telegram).
- *
- *   2. VocabStore — the domain API app.js actually talks to: manage
- *      multiple vocabulary sets, load/save a set's terms, track the
- *      active set, read/write settings.
- *
- * Telegram CloudStorage has hard limits (Bot API 6.9+):
- *   - up to 1024 keys total
- *   - each key: 1-128 chars, only [A-Za-z0-9_-]
- *   - each value: 0-4096 characters
- * A vocabulary set can easily outgrow a single 4096-char value, so each
- * set's terms are split into small JSON chunks stored under their own
- * keys (see CHUNK_CHAR_LIMIT below), and the set's index keeps track of
- * how many chunks it has. The same chunking is used for the localStorage
- * backend too, so behaviour is identical in both environments.
- * -----------------------------------------------------------------------
- */
+/** Copy-on-write storage with bounded operations; legacy v2 sets stay readable. */
 (function (global) {
-
-  const KEY_PREFIX = 'vocabapp_v2_';
-  const CHUNK_CHAR_LIMIT = 3500; // safety margin under Telegram's 4096 limit
-
-  // ---------------------------------------------------------------------
-  // Low-level backends
-  // ---------------------------------------------------------------------
+  const PREFIX = 'vocabapp_v2_', PART_SIZE = 3500, MAX_PARTS = 900;
+  const INTERVALS = [1,2,4,7,14,21,30,45,60,90];
+  class StorageError extends Error {
+    constructor(message, code = 'storage') { super(message); this.name = 'StorageError'; this.code = code; }
+  }
   class LocalStorageBackend {
     constructor() { this.name = 'local'; }
-
-    async getItem(key) {
-      try { return window.localStorage.getItem(KEY_PREFIX + key); }
-      catch (e) { console.error('localStorage getItem failed', e); return null; }
+    async getItem(key) { try { return global.localStorage.getItem(PREFIX + key); } catch { throw new StorageError('Хранилище браузера недоступно.'); } }
+    async getItems(keys) { return Object.fromEntries(await Promise.all(keys.map(async key => [key, await this.getItem(key)]))); }
+    async setItem(key, value) { try { global.localStorage.setItem(PREFIX + key, value); return true; } catch { return false; } }
+    async removeItems(keys) { try { keys.forEach(key => global.localStorage.removeItem(PREFIX + key)); return true; } catch { return false; } }
+  }
+  class CloudStorageBackend {
+    constructor(cloud, timeoutMs = 8000) { this.name = 'cloud'; this.cloud = cloud; this.timeoutMs = timeoutMs; }
+    _call(method, args) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => { settled = true; reject(new StorageError('Telegram не ответил вовремя. Проверь соединение и обнови страницу перед повторной попыткой.', 'timeout')); }, this.timeoutMs);
+        const done = (error, value) => {
+          if (settled) return;
+          settled = true; clearTimeout(timer);
+          if (error) reject(new StorageError('Не удалось обратиться к хранилищу Telegram.'));
+          else resolve(value);
+        };
+        try { this.cloud[method](...args, done); } catch (error) { done(error); }
+      });
     }
-
+    async getItem(key) { return await this._call('getItem', [key]) || null; }
     async getItems(keys) {
       const out = {};
-      for (const k of keys) out[k] = await this.getItem(k);
+      for (let i = 0; i < keys.length; i += 50) {
+        const batch = keys.slice(i, i + 50), values = await this._call('getItems', [batch]);
+        if (Array.isArray(values)) batch.forEach((key, j) => { out[key] = values[j]; });
+        else Object.assign(out, values || {});
+      }
       return out;
     }
-
     async setItem(key, value) {
-      try { window.localStorage.setItem(KEY_PREFIX + key, value); return true; }
-      catch (e) { console.error('localStorage setItem failed', e); return false; }
+      if (value.length > 4096) throw new StorageError('Запись слишком большая для Telegram.', 'limit');
+      return await this._call('setItem', [key, value]) !== false;
     }
-
     async removeItems(keys) {
-      try { keys.forEach((k) => window.localStorage.removeItem(KEY_PREFIX + k)); return true; }
-      catch (e) { console.error('localStorage removeItems failed', e); return false; }
+      for (let i = 0; i < keys.length; i += 50) if (await this._call('removeItems', [keys.slice(i, i + 50)]) === false) return false;
+      return true;
     }
   }
-
-  class CloudStorageBackend {
-    constructor(cloudStorage) {
-      this.name = 'cloud';
-      this.cloud = cloudStorage;
-    }
-
-    getItem(key) {
-      return new Promise((resolve) => {
-        try {
-          this.cloud.getItem(key, (err, value) => {
-            if (err) { console.error('CloudStorage getItem error', err); resolve(null); return; }
-            resolve(value || null);
-          });
-        } catch (e) { console.error('CloudStorage getItem threw', e); resolve(null); }
-      });
-    }
-
-    getItems(keys) {
-      if (keys.length === 0) return Promise.resolve({});
-      return new Promise((resolve) => {
-        try {
-          this.cloud.getItems(keys, (err, values) => {
-            if (err) { console.error('CloudStorage getItems error', err); resolve({}); return; }
-            // Official API returns {key: value}; be defensive in case a
-            // client implementation returns a parallel array instead.
-            if (Array.isArray(values)) {
-              const out = {};
-              keys.forEach((k, i) => { out[k] = values[i] || null; });
-              resolve(out);
-            } else {
-              resolve(values || {});
-            }
-          });
-        } catch (e) { console.error('CloudStorage getItems threw', e); resolve({}); }
-      });
-    }
-
-    setItem(key, value) {
-      return new Promise((resolve) => {
-        try {
-          this.cloud.setItem(key, value, (err, ok) => {
-            if (err) console.error('CloudStorage setItem error', err);
-            resolve(!err && ok !== false);
-          });
-        } catch (e) { console.error('CloudStorage setItem threw', e); resolve(false); }
-      });
-    }
-
-    removeItems(keys) {
-      if (keys.length === 0) return Promise.resolve(true);
-      return new Promise((resolve) => {
-        try {
-          this.cloud.removeItems(keys, (err, ok) => {
-            if (err) console.error('CloudStorage removeItems error', err);
-            resolve(!err && ok !== false);
-          });
-        } catch (e) { console.error('CloudStorage removeItems threw', e); resolve(false); }
-      });
-    }
-  }
-
   function detectBackend() {
-    try {
-      const tg = global.Telegram && global.Telegram.WebApp;
-      const cs = tg && tg.CloudStorage;
-      const isTelegramContext = Boolean(tg && tg.initData);
-      const supportsCloudStorage = Boolean(tg && typeof tg.isVersionAtLeast === 'function' && tg.isVersionAtLeast('6.9'));
-      if (isTelegramContext && supportsCloudStorage && cs &&
-          typeof cs.setItem === 'function' && typeof cs.getItem === 'function') {
-        return new CloudStorageBackend(cs);
-      }
-    } catch (e) { /* fall through to localStorage */ }
-    return new LocalStorageBackend();
+    const tg = global.Telegram?.WebApp;
+    return tg?.initData && tg.isVersionAtLeast?.('6.9') && tg.CloudStorage?.setItem && tg.CloudStorage?.getItems
+      ? new CloudStorageBackend(tg.CloudStorage) : new LocalStorageBackend();
   }
-
-  // ---------------------------------------------------------------------
-  // Chunking helpers
-  // ---------------------------------------------------------------------
-  function packIntoChunks(terms) {
-    const chunks = [];
-    let current = [];
-    let currentLen = 2; // "[]"
-    for (const term of terms) {
-      const piece = JSON.stringify(term);
-      const addedLen = piece.length + 1; // + comma/bracket overhead
-      if (current.length > 0 && currentLen + addedLen > CHUNK_CHAR_LIMIT) {
-        chunks.push(current);
-        current = [];
-        currentLen = 2;
-      }
-      current.push(term);
-      currentLen += addedLen;
-    }
-    if (current.length > 0) chunks.push(current);
-    return chunks;
+  function parse(raw, fallback) { try { return JSON.parse(raw); } catch { return fallback; } }
+  function split(text) {
+    const parts = [];
+    for (let i = 0; i < text.length; i += PART_SIZE) parts.push(text.slice(i, i + PART_SIZE));
+    if (parts.length > MAX_PARTS) throw new StorageError('Слишком много данных. Раздели словарь на меньшие наборы.', 'limit');
+    return parts;
   }
-
-  // ---------------------------------------------------------------------
-  // Domain store
-  // ---------------------------------------------------------------------
+  function validEntry(set) {
+    return set && typeof set.id === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(set.id) && typeof set.name === 'string' &&
+      Number.isInteger(set.chunkCount) && set.chunkCount > 0 && set.chunkCount <= MAX_PARTS &&
+      Number.isInteger(set.termCount) && set.termCount >= 0 && (!set.dataId || /^[A-Za-z0-9_-]{1,80}$/.test(set.dataId));
+  }
   class VocabStore {
-    constructor(backend) {
-      this.backend = backend;
-    }
-
-    static async create() {
-      return new VocabStore(detectBackend());
-    }
-
+    constructor(backend) { this.backend = backend; this._tail = Promise.resolve(); this._indexKeys = []; }
+    static async create() { return new VocabStore(detectBackend()); }
     get backendName() { return this.backend.name; }
-
-    // ---- settings ----
+    _newId() { return (global.crypto.randomUUID ? global.crypto.randomUUID() : 'id-' + Date.now() + '-' + Math.random().toString(16).slice(2)).replace(/[^a-zA-Z0-9_-]/g, '-'); }
+    _mutate(operation) {
+      const guarded = () => {
+        if (this._uncertain) throw new StorageError('Результат предыдущего сохранения неизвестен. Обнови страницу перед следующей записью.', 'timeout');
+        return operation();
+      };
+      const run = () => global.navigator?.locks?.request && this.backendName === 'local'
+        ? global.navigator.locks.request('vocab-storage-write', guarded) : guarded();
+      const result = this._tail.catch(() => {}).then(run);
+      this._tail = result.catch(() => {});
+      return result;
+    }
+    async _write(key, value) {
+      try {
+        if (!await this.backend.setItem(key, value)) throw new StorageError('Не удалось сохранить данные. Возможно, хранилище заполнено.', 'write');
+      } catch (error) { if (error.code === 'timeout') this._uncertain = true; throw error; }
+    }
+    async _cleanup(keys) { try { if (keys.length && !await this.backend.removeItems(keys)) console.warn('Unused storage parts remain', keys.length); } catch (error) { console.warn('Storage cleanup failed', error); } }
     async getSettings() {
-      const raw = await this.backend.getItem('settings');
-      if (!raw) return { intervalsDays: [1, 2, 4, 7, 14, 21, 30, 45, 60, 90], masteryToLearn: 10 };
-      try { return JSON.parse(raw); } catch { return { intervalsDays: [1, 2, 4, 7, 14, 21, 30, 45, 60, 90], masteryToLearn: 10 }; }
+      const value = parse(await this.backend.getItem('settings'), null), intervals = value?.intervalsDays;
+      return { intervalsDays:Array.isArray(intervals) && intervals.length > 0 && intervals.length <= 30 &&
+        intervals.every((day, i) => Number.isFinite(day) && day > 0 && (!i || day >= intervals[i - 1])) ? intervals : INTERVALS.slice(), masteryToLearn:10 };
     }
-    async setSettings(settings) { return this.backend.setItem('settings', JSON.stringify(settings)); }
-
+    async setSettings(value) { return this._mutate(async () => { await this._write('settings', JSON.stringify(value)); return true; }); }
     async getActivity() {
-      const raw = await this.backend.getItem('activity');
-      if (!raw) return { lastDay: null, streak: 0, longest: 0 };
-      try { return JSON.parse(raw); }
-      catch { return { lastDay: null, streak: 0, longest: 0 }; }
+      const value = parse(await this.backend.getItem('activity'), null);
+      const number = key => Number.isFinite(value?.[key]) && value[key] >= 0 ? Math.floor(value[key]) : 0;
+      return { lastDay:/^\d{4}-\d{2}-\d{2}$/.test(value?.lastDay || '') ? value.lastDay : null,
+        streak:number('streak'), longest:number('longest'), dailyCount:number('dailyCount'), dailyGoal:[5,10,20].includes(value?.dailyGoal) ? value.dailyGoal : 5 };
     }
-    async setActivity(activity) { return this.backend.setItem('activity', JSON.stringify(activity)); }
-
-    // ---- sets index ----
+    async setActivity(value) { return this._mutate(async () => { await this._write('activity', JSON.stringify(value)); return true; }); }
     async listSets() {
       const raw = await this.backend.getItem('sets_index');
-      if (!raw) return [];
-      try { return JSON.parse(raw); } catch { return []; }
+      if (!raw) { this._indexKeys = []; return []; }
+      let list = parse(raw, null);
+      if (list?.version === 3 && /^[A-Za-z0-9_-]{1,80}$/.test(list.generation) && Number.isInteger(list.pageCount) && list.pageCount > 0 && list.pageCount <= MAX_PARTS) {
+        const keys = Array.from({length:list.pageCount}, (_, i) => 'index_' + list.generation + '_' + i);
+        const values = await this.backend.getItems(keys);
+        if (keys.some(key => typeof values[key] !== 'string')) throw new StorageError('Часть списка наборов отсутствует. Данные не будут перезаписаны.', 'damaged');
+        list = parse(keys.map(key => values[key]).join(''), null); this._indexKeys = keys;
+      } else this._indexKeys = [];
+      if (!Array.isArray(list) || !list.every(validEntry) || new Set(list.map(set => set.id)).size !== list.length)
+        throw new StorageError('Список наборов повреждён. Данные сохранены без изменений.', 'damaged');
+      return list;
     }
-    async _saveSetsIndex(list) { return this.backend.setItem('sets_index', JSON.stringify(list)); }
-
-    async getActiveSetId() {
-      const raw = await this.backend.getItem('active_set');
-      return raw || null;
+    async _saveSetsIndex(list) {
+      const generation = this._newId(), pages = split(JSON.stringify(list));
+      const keys = pages.map((_, i) => 'index_' + generation + '_' + i), previous = this._indexKeys.slice();
+      try {
+        for (let i = 0; i < pages.length; i++) await this._write(keys[i], pages[i]);
+        // Root pointer is the commit point. Old generations stay intact until it succeeds.
+        await this._write('sets_index', JSON.stringify({version:3,generation,pageCount:pages.length}));
+      } catch (error) {
+        // A timeout may complete remotely later: never delete potentially referenced data.
+        if (error.code !== 'timeout') await this._cleanup(keys);
+        throw error;
+      }
+      this._indexKeys = keys; await this._cleanup(previous); return true;
     }
-    async setActiveSetId(id) { return this.backend.setItem('active_set', id); }
-
-    _newId() {
-      return (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Date.now() + '-' + Math.random().toString(16).slice(2))
-        .replace(/[^a-zA-Z0-9_-]/g, '-');
+    async getActiveSetId() { return await this.backend.getItem('active_set') || null; }
+    async setActiveSetId(id) { await this._write('active_set', id || ''); return true; }
+    _dataKeys(entry) { return Array.from({length:entry.chunkCount}, (_, i) => 's_' + (entry.dataId || entry.id) + '_' + i); }
+    async _replaceTerms(sets, entry, terms) {
+      const parts = split(JSON.stringify(terms)), dataId = this._newId(), keys = parts.map((_, i) => 's_' + dataId + '_' + i);
+      const next = {...entry,dataId,format:'json-parts',termCount:terms.length,chunkCount:parts.length};
+      const updated = sets.some(set => set.id === entry.id) ? sets.map(set => set.id === entry.id ? next : set) : [...sets,next];
+      const required = sets.reduce((sum, set) => sum + set.chunkCount, 0) + parts.length + this._indexKeys.length + Math.ceil(JSON.stringify(updated).length / PART_SIZE) + 8;
+      if (this.backendName === 'cloud' && required > 950) throw new StorageError('Недостаточно места в Telegram для безопасного сохранения. Уменьши объём словаря.', 'limit');
+      try {
+        for (let i = 0; i < parts.length; i++) await this._write(keys[i], parts[i]);
+        await this._saveSetsIndex(updated);
+      } catch (error) {
+        if (error.code !== 'timeout') await this._cleanup(keys);
+        throw error;
+      }
+      if (sets.some(set => set.id === entry.id)) await this._cleanup(this._dataKeys(entry));
+      return next;
     }
-
-    /** Creates a new set from already-built term objects (see srs.makeTerm). */
     async createSet(name, terms, language) {
-      const id = this._newId();
-      const chunks = packIntoChunks(terms);
-      await Promise.all(chunks.map((chunk, idx) =>
-        this.backend.setItem(`s_${id}_${idx}`, JSON.stringify(chunk))
-      ));
-      const sets = await this.listSets();
-      sets.push({
-        id,
-        name,
-        language: language || 'mixed',
-        createdAt: Date.now(),
-        termCount: terms.length,
-        chunkCount: Math.max(chunks.length, 1)
+      return this._mutate(async () => {
+        if (!terms.length) throw new StorageError('Набор не содержит слов.');
+        const sets = await this.listSets(), id = this._newId();
+        await this._replaceTerms(sets, {id,name,language:language || 'mixed',createdAt:Date.now()}, terms);
+        try { await this.setActiveSetId(id); } catch (error) { console.warn('Set saved; active preference unavailable', error); }
+        return id;
       });
-      await this._saveSetsIndex(sets);
-      await this.setActiveSetId(id);
-      return id;
     }
-
-    async renameSet(id, name) {
-      const sets = await this.listSets();
-      const entry = sets.find((s) => s.id === id);
-      if (!entry) return false;
-      entry.name = name;
-      await this._saveSetsIndex(sets);
-      return true;
+    async renameSet(id, name) { return this._updateMetadata(id, {name}); }
+    async updateSetLanguage(id, language) { return this._updateMetadata(id, {language:language || 'mixed'}); }
+    _updateMetadata(id, patch) {
+      return this._mutate(async () => {
+        const sets = await this.listSets(); if (!sets.some(set => set.id === id)) return false;
+        await this._saveSetsIndex(sets.map(set => set.id === id ? {...set,...patch} : set)); return true;
+      });
     }
-
-    async updateSetLanguage(id, language) {
-      const sets = await this.listSets();
-      const entry = sets.find((s) => s.id === id);
-      if (!entry) return false;
-      entry.language = language || 'mixed';
-      await this._saveSetsIndex(sets);
-      return true;
-    }
-
     async deleteSet(id) {
-      const sets = await this.listSets();
-      const entry = sets.find((s) => s.id === id);
-      if (!entry) return false;
-      const keys = Array.from({ length: entry.chunkCount }, (_, i) => `s_${id}_${i}`);
-      const remaining = sets.filter((s) => s.id !== id);
-      // The index is authoritative. Keep the word chunks intact if updating
-      // it fails, so a failed deletion cannot leave a visible empty set.
-      if (!await this._saveSetsIndex(remaining)) return false;
-      const active = await this.getActiveSetId();
-      if (active === id) {
-        await this.setActiveSetId(remaining.length ? remaining[0].id : '');
-      }
-      if (!await this.backend.removeItems(keys)) console.warn('Deleted set chunks could not be cleaned up', id);
-      return true;
-    }
-
-    /**
-     * Loads every term in a set, plus a map of termId -> chunk index so
-     * app.js can persist a single changed term by rewriting only its own
-     * chunk instead of the whole set.
-     */
-    async loadSetTerms(id) {
-      const sets = await this.listSets();
-      const entry = sets.find((s) => s.id === id);
-      if (!entry) return { terms: [], chunkMap: new Map(), chunkCount: 0 };
-
-      const keys = Array.from({ length: entry.chunkCount }, (_, i) => `s_${id}_${i}`);
-      const values = await this.backend.getItems(keys);
-      const terms = [];
-      const chunkMap = new Map();
-
-      keys.forEach((key, idx) => {
-        const raw = values[key];
-        if (!raw) return;
-        let chunk = [];
-        try { chunk = JSON.parse(raw); } catch { chunk = []; }
-        if (!Array.isArray(chunk)) return;
-        chunk.forEach((t) => {
-          if (!t || typeof t !== 'object' || !t.id) return;
-          terms.push(t);
-          chunkMap.set(t.id, idx);
-        });
+      return this._mutate(async () => {
+        const sets = await this.listSets(), entry = sets.find(set => set.id === id); if (!entry) return false;
+        const active = await this.getActiveSetId();
+        const remaining = sets.filter(set => set.id !== id); await this._saveSetsIndex(remaining);
+        if (active === id) { try { await this.setActiveSetId(remaining[0]?.id || ''); } catch (error) { console.warn('Active preference unavailable', error); } }
+        await this._cleanup(this._dataKeys(entry)); return true;
       });
-
-      return { terms, chunkMap, chunkCount: entry.chunkCount };
     }
-
-    /** Rewrites a single chunk of a set (used after scoring one term). */
-    async saveChunk(setId, chunkIndex, chunkTerms) {
-      return this.backend.setItem(`s_${setId}_${chunkIndex}`, JSON.stringify(chunkTerms));
-    }
-
-    /** Adds one term and safely repacks the set if the last cloud chunk is full. */
-    async addTerm(setId, term) {
-      const sets = await this.listSets();
-      const entry = sets.find((s) => s.id === setId);
-      if (!entry) return { ok: false, reason: 'missing_set' };
-
-      const data = await this.loadSetTerms(setId);
-      const normalized = (value) => (value || '').trim().toLocaleLowerCase();
-      if (data.terms.some((item) => normalized(item.term) === normalized(term.term))) {
-        return { ok: false, reason: 'duplicate' };
+    async loadSetTerms(id) {
+      const entry = (await this.listSets()).find(set => set.id === id); if (!entry) return {terms:[],chunkMap:new Map(),chunkCount:0};
+      const keys = this._dataKeys(entry), values = await this.backend.getItems(keys), chunkMap = new Map();
+      if (keys.some(key => typeof values[key] !== 'string')) throw new StorageError('Не все слова удалось прочитать. Набор не изменён.', 'damaged');
+      let terms = [];
+      if (entry.format === 'json-parts') {
+        terms = parse(keys.map(key => values[key]).join(''), null);
+        if (!Array.isArray(terms)) throw new StorageError('Данные набора повреждены.', 'damaged');
+        terms.forEach(term => chunkMap.set(term?.id, 0));
+      } else {
+        keys.forEach((key, idx) => {
+          const chunk = parse(values[key], null);
+          if (!Array.isArray(chunk)) throw new StorageError('Данные набора повреждены.', 'damaged');
+          chunk.forEach(term => { terms.push(term); chunkMap.set(term?.id, idx); });
+        });
       }
-
-      const chunks = packIntoChunks([...data.terms, term]);
-      await Promise.all(chunks.map((chunk, idx) =>
-        this.backend.setItem(`s_${setId}_${idx}`, JSON.stringify(chunk))
-      ));
-      if (entry.chunkCount > chunks.length) {
-        const unused = Array.from({ length: entry.chunkCount - chunks.length }, (_, i) => `s_${setId}_${chunks.length + i}`);
-        await this.backend.removeItems(unused);
-      }
-      entry.termCount = data.terms.length + 1;
-      entry.chunkCount = Math.max(chunks.length, 1);
-      await this._saveSetsIndex(sets);
-      return { ok: true };
+      if (terms.length !== entry.termCount || terms.some(term => !term || typeof term.id !== 'string' || typeof term.term !== 'string' || typeof term.translation !== 'string') || new Set(terms.map(term => term.id)).size !== terms.length)
+        throw new StorageError('В наборе есть повреждённые записи. Оригинал сохранён.', 'damaged');
+      return {terms,chunkMap,chunkCount:entry.chunkCount};
     }
-
-    /** Updates one term while keeping its learning progress intact. */
-    async updateTerm(setId, term) {
-      const sets = await this.listSets();
-      const entry = sets.find((s) => s.id === setId);
-      if (!entry) return { ok: false, reason: 'missing_set' };
-
-      const data = await this.loadSetTerms(setId);
-      const index = data.terms.findIndex((item) => item.id === term.id);
-      if (index < 0) return { ok: false, reason: 'missing_term' };
-
-      const normalized = (value) => (value || '').trim().toLocaleLowerCase();
-      if (data.terms.some((item) => item.id !== term.id && normalized(item.term) === normalized(term.term))) {
-        return { ok: false, reason: 'duplicate' };
-      }
-
-      const updated = data.terms.slice();
-      updated[index] = term;
-      const chunks = packIntoChunks(updated);
-      await Promise.all(chunks.map((chunk, idx) =>
-        this.backend.setItem(`s_${setId}_${idx}`, JSON.stringify(chunk))
-      ));
-      if (entry.chunkCount > chunks.length) {
-        const unused = Array.from({ length: entry.chunkCount - chunks.length }, (_, i) => `s_${setId}_${chunks.length + i}`);
-        await this.backend.removeItems(unused);
-      }
-      entry.chunkCount = Math.max(chunks.length, 1);
-      await this._saveSetsIndex(sets);
-      return { ok: true };
+    async addTerm(id, term) { return this._editTerms(id, term, false); }
+    async updateTerm(id, term) { return this._editTerms(id, term, true); }
+    async saveTerm(id, term) { return this._editTerms(id, term, true, true); }
+    _editTerms(id, term, editing, progressOnly = false) {
+      const snapshot = JSON.parse(JSON.stringify(term));
+      return this._mutate(async () => {
+        const sets = await this.listSets(), entry = sets.find(set => set.id === id); if (!entry) return {ok:false,reason:'missing_set'};
+        const {terms} = await this.loadSetTerms(id), index = terms.findIndex(item => item.id === snapshot.id);
+        if (editing && index < 0) return {ok:false,reason:'missing_term'};
+        const norm = value => value.trim().normalize('NFC').toLocaleLowerCase();
+        if (!progressOnly && terms.some(item => item.id !== snapshot.id && norm(item.term) === norm(snapshot.term))) return {ok:false,reason:'duplicate'};
+        if (editing) terms[index] = progressOnly
+          ? {...terms[index], ...snapshot, term:terms[index].term, translation:terms[index].translation, context:terms[index].context}
+          : snapshot;
+        else terms.push(snapshot);
+        await this._replaceTerms(sets, entry, terms); return {ok:true};
+      });
     }
-
-    /** Updates termCount stat on the set index (cosmetic, best-effort). */
-    async touchSetStats(id, termCount) {
-      const sets = await this.listSets();
-      const entry = sets.find((s) => s.id === id);
-      if (!entry) return;
-      entry.termCount = termCount;
-      await this._saveSetsIndex(sets);
-    }
+    async saveChunk(id, index, records) { for (const term of records) if (!(await this.saveTerm(id, term)).ok) return false; return true; }
+    async touchSetStats() { /* Counts commit with data, never separately. */ }
   }
-
-  global.VocabStorage = { VocabStore };
+  global.VocabStorage = {VocabStore, StorageError, CloudStorageBackend, LocalStorageBackend};
 })(window);

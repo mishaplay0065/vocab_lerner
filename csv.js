@@ -30,6 +30,9 @@
     let row = [];
     let field = '';
     let inQuotes = false;
+    let closedQuote = false;
+    let lineNo = 1;
+    let rowLine = 1;
     let i = 0;
     const n = text.length;
 
@@ -39,32 +42,51 @@
       if (inQuotes) {
         if (c === '"') {
           if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
-          inQuotes = false; i++; continue;
+          inQuotes = false; closedQuote = true; i++; continue;
         }
+        if (c === '\n') lineNo++;
         field += c; i++; continue;
       }
 
-      if (c === '"') { inQuotes = true; i++; continue; }
-      if (c === delimiter) { row.push(field); field = ''; i++; continue; }
+      if (c === '"') {
+        if (field.trim() || closedQuote) throw new Error('Кавычка внутри поля без корректного экранирования.');
+        inQuotes = true; field = ''; i++; continue;
+      }
+      if (c === delimiter) { row.push(field); field = ''; closedQuote = false; i++; continue; }
       if (c === '\r') { i++; continue; }
       if (c === '\n') {
         row.push(field); field = '';
+        row.lineNo = rowLine;
         rows.push(row); row = [];
+        closedQuote = false; lineNo++; rowLine = lineNo;
         i++; continue;
       }
-      field += c; i++;
+      if (closedQuote && !/\s/.test(c)) throw new Error('Лишний текст после закрывающей кавычки.');
+      if (!closedQuote) field += c;
+      i++;
     }
+    if (inQuotes) throw new Error(`Строка ${rowLine}: не закрыта кавычка.`);
     // last field/row
     if (field.length > 0 || row.length > 0) {
       row.push(field);
+      row.lineNo = rowLine;
       rows.push(row);
     }
     return rows.filter((r) => !(r.length === 1 && r[0].trim() === ''));
   }
 
   function detectDelimiter(firstLine) {
-    const semi = (firstLine.match(/;/g) || []).length;
-    const comma = (firstLine.match(/,/g) || []).length;
+    let semi = 0, comma = 0, quoted = false;
+    for (let i = 0; i < firstLine.length; i++) {
+      if (firstLine[i] === '"') {
+        if (quoted && firstLine[i + 1] === '"') { i++; continue; }
+        quoted = !quoted;
+      } else if (!quoted) {
+        if (firstLine[i] === '\n' && (semi || comma)) break;
+        if (firstLine[i] === ';') semi++;
+        if (firstLine[i] === ',') comma++;
+      }
+    }
     return semi >= comma ? ';' : ',';
   }
 
@@ -77,7 +99,8 @@
   }
 
   function looksLikeHeader(row) {
-    return row.some((cell) => matchHeaderIndex(cell) !== null);
+    const keys = new Set(row.map(matchHeaderIndex).filter(Boolean));
+    return keys.size >= 2;
   }
 
   /**
@@ -92,15 +115,14 @@
       return { items: [], errors: ['Файл пустой.'], warnings };
     }
 
-    const text = stripBom(rawText).trim();
-    const firstLine = text.split(/\r\n|\n/, 1)[0] || '';
-    const delimiter = detectDelimiter(firstLine);
+    const text = stripBom(rawText).replace(/\r\n?/g, '\n');
+    const delimiter = detectDelimiter(text);
 
     let rows;
     try {
       rows = tokenize(text, delimiter);
     } catch (e) {
-      return { items: [], errors: ['Не удалось прочитать файл. Проверьте кодировку (нужна UTF-8) и формат CSV.'], warnings };
+      return { items: [], errors: [`Не удалось прочитать CSV: ${e.message}`], warnings };
     }
 
     if (rows.length === 0) {
@@ -134,7 +156,9 @@
     const seen = new Set();
 
     dataRows.forEach((row, idx) => {
-      const lineNo = startLineNo + idx;
+      const lineNo = row.lineNo || startLineNo + idx;
+      const expectedColumns = looksLikeHeader(rows[0]) ? rows[0].length : 3;
+      if (row.length > expectedColumns) warnings.push(`Строка ${lineNo}: лишние столбцы после ${expectedColumns}-го не используются.`);
       if (row.length === 1 && row[0].trim() === '') return; // blank line
 
       const term = (row[colMap.term] || '').trim();

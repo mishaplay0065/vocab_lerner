@@ -56,14 +56,18 @@
   function applyAnswer(term, isCorrect, intervals) {
     intervals = intervals || DEFAULT_INTERVALS_DAYS;
     const now = Date.now();
+    const wasDue = term.attempts === 0 || isDue(term, now);
+    term.mastery_level = effectiveMastery(term, intervals, now);
     term.attempts += 1;
     term.last_seen = now;
 
     if (isCorrect) {
       term.correct_count += 1;
-      term.mastery_level = Math.min(term.mastery_level + 1, intervals.length);
-      const stepDays = intervals[Math.min(term.mastery_level, intervals.length) - 1];
-      term.due_date = now + stepDays * 24 * 60 * 60 * 1000;
+      if (wasDue) {
+        term.mastery_level = Math.min(term.mastery_level + 1, intervals.length);
+        const stepDays = intervals[Math.min(term.mastery_level, intervals.length) - 1];
+        term.due_date = now + stepDays * 24 * 60 * 60 * 1000;
+      }
     } else {
       term.mastery_level = Math.max(term.mastery_level - 1, 0);
       term.due_date = now + RELEARN_MINUTES * 60 * 1000;
@@ -76,6 +80,20 @@
   function isDue(term, now) {
     now = now || Date.now();
     return term.due_date <= now;
+  }
+
+  function effectiveMastery(term, intervals, now) {
+    intervals = intervals || DEFAULT_INTERVALS_DAYS;
+    now = now ?? Date.now();
+    const level = Math.max(0, Math.min(term.mastery_level || 0, intervals.length));
+    if (!level || !term.last_seen || now < term.due_date) return level;
+    const period = Math.max(1, intervals[level - 1]) * 86400000;
+    const decay = Math.floor((now - term.due_date) / period) + (term.status === 'learned' ? 1 : 0);
+    return Math.max(0, level - decay);
+  }
+
+  function needsReminder(term, intervals, now) {
+    return term.status !== 'learned' || effectiveMastery(term, intervals, now) < (intervals || DEFAULT_INTERVALS_DAYS).length;
   }
 
   function isStale(term, days, now) {
@@ -126,6 +144,8 @@
     makeTerm,
     applyAnswer,
     isDue,
+    effectiveMastery,
+    needsReminder,
     isStale,
     statusFor,
     localDay,

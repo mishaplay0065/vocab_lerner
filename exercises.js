@@ -21,6 +21,7 @@
   function normalize(str) {
     return (str || '')
       .toString()
+      .normalize('NFC')
       .trim()
       .toLowerCase()
       .replace(/ё/g, 'е')
@@ -102,8 +103,8 @@
     if (a === b) return true;
     const longest = Math.max(a.length, b.length);
     if (longest < 5) return false;
-    const allowance = longest >= 9 ? 2 : 1;
-    return editDistance(a, b) <= allowance;
+    // A small typo, not a different ending or several wrong letters.
+    return longest >= 6 && editDistance(a, b) <= 1;
   }
 
   function fuzzyRussianWordsInAnyOrder(a, b) {
@@ -121,7 +122,7 @@
   }
 
   function answersMatch(a, b, options) {
-    const actual = rawAnswerVariants(a);
+    const actual = [String(a || '').trim()].filter(Boolean);
     const expected = rawAnswerVariants(b);
     const language = options && options.language;
     if (actual.length === 0 || expected.length === 0) return false;
@@ -129,12 +130,22 @@
       if (language === 'de' && !validGermanForm(givenRaw, answerRaw)) return false;
       const given = normalize(givenRaw);
       const answer = normalize(answerRaw);
+      if (options && options.strict) return given === answer;
       return given === answer ||
         (language !== 'de' && sameIgnoringLeadingEnglishArticle(given, answer)) ||
-        sameWordsInAnyOrder(given, answer) ||
-        fuzzyRussianWordsInAnyOrder(given, answer) ||
-        closeEnough(given, answer);
+        sameWordsInAnyOrder(given, answer);
     }));
+  }
+
+  function isPossibleTypo(a, b, options) {
+    if (!normalize(a) || answersMatch(a, b, options)) return false;
+    return rawAnswerVariants(b).some(answer => closeEnough(normalize(a), normalize(answer)) || fuzzyRussianWordsInAnyOrder(a, answer));
+  }
+
+  function canonicalLanguage(value) {
+    const aliases = { 'немецкий':'de', 'german':'de', 'deutsch':'de', 'английский':'en', 'english':'en', 'русский':'ru', 'russian':'ru', 'испанский':'es', 'spanish':'es', 'французский':'fr', 'french':'fr', 'итальянский':'it', 'italian':'it', 'португальский':'pt', 'portuguese':'pt', 'японский':'ja', 'japanese':'ja', 'китайский':'zh', 'chinese':'zh', 'корейский':'ko', 'korean':'ko', 'арабский':'ar', 'arabic':'ar', 'хинди':'hi', 'hindi':'hi' };
+    const normalized = String(value || '').trim().toLowerCase();
+    return aliases[normalized] || (/^(en|de|es|fr|it|pt|zh|ja|ko|ar|hi|ru)(?:-|_)[a-z]+$/.test(normalized) ? normalized.split(/[-_]/)[0] : normalized);
   }
 
   // ---- 1. Multiple choice ------------------------------------------------
@@ -255,7 +266,12 @@
 
   // ---- 5. Matching pairs (bonus, used occasionally with small pools) ----
   function buildMatching(terms) {
-    const chosen = shuffle(terms).slice(0, Math.min(4, terms.length));
+    const seenTerms = new Set(), seenTranslations = new Set();
+    const chosen = shuffle(terms).filter(term => {
+      const word = normalize(term.term), translation = normalize(term.translation);
+      if (seenTerms.has(word) || seenTranslations.has(translation)) return false;
+      seenTerms.add(word); seenTranslations.add(translation); return true;
+    }).slice(0, 4);
     const left = shuffle(chosen.map((t) => ({ termId: t.id, text: t.translation, side: 'translation' })));
     const right = shuffle(chosen.map((t) => ({ termId: t.id, text: t.term, side: 'term' })));
     return {
@@ -289,16 +305,45 @@
     }
   }
 
+  function buildReviewPlan(ids, pool) {
+    const unique = [...new Set(ids)];
+    const byId = new Map(pool.map(term => [term.id, term]));
+    const translations = new Set(pool.map(term => normalize(term.translation)));
+    const kinds = new Map(unique.map((id) => {
+      const term = byId.get(id);
+      const count = translations.size - Number(translations.has(normalize(term?.translation)));
+      return [id, shuffle([count >= 3 ? 'multiple_choice' : 'flashcard', 'type_answer', 'spelling'])];
+    }));
+    const plan = [];
+    for (let round = 0; round < 3; round++) {
+      let batch = shuffle(unique);
+      if (batch.length > 1 && batch[0] === plan[plan.length - 1]?.termId) batch.push(batch.shift());
+      plan.push(...batch.map((termId) => ({ termId, kind: kinds.get(termId)[round] })));
+    }
+    return plan;
+  }
+
+  function buildExercise(kind, term, pool) {
+    if (kind === 'multiple_choice') return buildMultipleChoice(term, pool);
+    if (kind === 'type_answer') return buildTypeAnswer(term);
+    if (kind === 'spelling') return buildSpelling(term);
+    return buildFlashcard(term);
+  }
+
   global.VocabExercises = {
     shuffle,
     normalize,
     answerVariants,
     answersMatch,
+    isPossibleTypo,
+    canonicalLanguage,
     buildMultipleChoice,
     buildTypeAnswer,
     buildSpelling,
     buildFlashcard,
     buildMatching,
+    buildReviewPlan,
+    buildExercise,
     pickExerciseType
   };
 })(window);

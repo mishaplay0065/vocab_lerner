@@ -69,6 +69,66 @@
 
   let el = {}; // populated on DOMContentLoaded
   let activityWriteQueue = Promise.resolve();
+  let importBusy = false;
+  let switchingSet = false;
+  let saveQueue = Promise.resolve();
+  let pendingWrites = [];
+  let pendingBackupAvailable = true;
+  let saveFailure = false;
+  let modalFocus = null;
+  function journalKey(kind) {
+    const user = window.Telegram?.WebApp?.initDataUnsafe?.user?.id || 'browser';
+    return `vocab_${kind}_${state.store?.backendName || 'local'}_${user}`;
+  }
+  function writeJournal(kind, value) {
+    try { localStorage.setItem(journalKey(kind), JSON.stringify(value)); return true; }
+    catch { showToast('Не удалось создать резервную копию в браузере. Не закрывай занятие до сохранения.', 6000); return false; }
+  }
+  function readJournal(kind) {
+    try { return JSON.parse(localStorage.getItem(journalKey(kind)) || 'null'); } catch { return null; }
+  }
+  function saveSession(pendingNext = null) {
+    if (!state.session.queue.length) { writeJournal('session', null); return; }
+    writeJournal('session', { version: 1, setId: state.activeSetId, updatedAt: Date.now(),
+      queue: state.session.queue, initialLength: state.session.initialLength,
+      reviewKinds: state.session.reviewKinds ? [...state.session.reviewKinds] : null,
+      reviewResults: [...(state.session.reviewResults || [])], studied: [...(state.session.studied || [])], pendingNext });
+  }
+  function updateSaveNotice(message) {
+    let notice = $('#saveNotice');
+    if (!notice) {
+      notice = document.createElement('div'); notice.id = 'saveNotice'; notice.className = 'save-notice';
+      notice.setAttribute('role', 'status'); $('#app').prepend(notice);
+    }
+    notice.hidden = !message;
+    notice.replaceChildren();
+    if (message) {
+      const text = document.createElement('span'); text.textContent = message; notice.append(text);
+      const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn btn-ghost';
+      retry.textContent = 'Повторить сохранение'; retry.onclick = () => flushPendingWrites(); notice.append(retry);
+    }
+  }
+  function flushPendingWrites() {
+    saveQueue = saveQueue.catch(() => {}).then(async () => {
+      try {
+        while (pendingWrites.length) {
+          const job = pendingWrites[0];
+          if (!state.sets.some(set => set.id === job.setId)) { pendingWrites.shift(); writeJournal('pending', pendingWrites); continue; }
+          const result = await state.store.saveTerm(job.setId, job.term);
+          if (!result.ok) throw new Error('Не удалось сохранить слово');
+          await state.store.setActivity(job.activity);
+          pendingWrites.shift(); pendingBackupAvailable = writeJournal('pending', pendingWrites);
+        }
+        saveFailure = false; updateSaveNotice('');
+      } catch (error) {
+        console.error('Progress write failed', error); saveFailure = true;
+        updateSaveNotice(pendingBackupAvailable
+          ? (error.code === 'timeout' ? 'Telegram не подтвердил сохранение. Обнови страницу: резервная копия будет восстановлена.' : 'Прогресс пока не сохранён в основном хранилище. Резервная копия остаётся в этом браузере.')
+          : 'Не удалось сохранить прогресс и резервную копию. Не закрывай страницу.');
+      }
+    });
+    return saveQueue;
+  }
   const $ = (sel) => document.querySelector(sel);
   const SCREEN_TITLES = { home: 'Vocab', learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Vocab', loading: 'Vocab' };
 
@@ -115,7 +175,10 @@
   }
 
   let confirmResolve = null;
-  function confirmDialog(message) {
+  function confirmDialog(message, options = {}) {
+    modalFocus = document.activeElement;
+    $('#confirmTitle').textContent = options.title || 'Удалить набор?';
+    el.btnConfirmDelete.textContent = options.action || 'Удалить';
     el.confirmMessage.textContent = message;
     el.confirmBackdrop.hidden = false;
     $('#app').inert = true;
@@ -129,6 +192,8 @@
     $('#app').inert = false;
     const resolve = confirmResolve;
     confirmResolve = null;
+    if (modalFocus?.isConnected && modalFocus.getClientRects().length) modalFocus.focus();
+    else if (!el.btnSetMenu.hidden) el.btnSetMenu.focus();
     resolve(ok);
   }
 
@@ -217,19 +282,19 @@
     term.term = String(term.term ?? term.word ?? term.front ?? '');
     term.translation = String(term.translation ?? term.definition ?? term.back ?? '');
     term.context = String(term.context ?? '');
-    term.attempts = Number.isFinite(Number(term.attempts)) ? Math.max(0, Number(term.attempts)) : 0;
-    term.correct_count = Number.isFinite(Number(term.correct_count)) ? Math.max(0, Number(term.correct_count)) : 0;
-    term.mastery_level = Number.isFinite(Number(term.mastery_level)) ? Math.max(0, Number(term.mastery_level)) : 0;
+    term.attempts = Number.isFinite(Number(term.attempts)) ? Math.max(0, Math.floor(Number(term.attempts))) : 0;
+    term.correct_count = Number.isFinite(Number(term.correct_count)) ? Math.min(term.attempts, Math.max(0, Math.floor(Number(term.correct_count)))) : 0;
+    term.mastery_level = Number.isFinite(Number(term.mastery_level)) ? Math.min(state.settings.intervalsDays.length, Math.max(0, Math.floor(Number(term.mastery_level)))) : 0;
     term.due_date = Number.isFinite(Number(term.due_date)) ? Number(term.due_date) : Date.now();
     term.created_at = Number.isFinite(Number(term.created_at)) ? Number(term.created_at) : Date.now();
-    if (!['new', 'learning', 'learned'].includes(term.status)) term.status = term.attempts ? 'learning' : 'new';
+    term.status = term.attempts === 0 && term.last_review_failed ? 'learning' : Srs.statusFor(term, state.settings.intervalsDays);
     return term;
   }
 
   // ---------------------------------------------------------------------
   // Screen navigation
   // ---------------------------------------------------------------------
-  function showScreen(name) {
+  function showScreen(name, customQueue, forceNew = false) {
     console.log('renderScreen:', name);
     state.screen = name;
     window.scrollTo(0, 0);
@@ -269,7 +334,7 @@
     });
 
     if (name === 'home') renderHome();
-    if (name === 'learn') startLearnSession();
+    if (name === 'learn') startLearnSession(customQueue, forceNew);
     if (name === 'review') renderReview();
     if (name === 'progress') renderProgress();
   }
@@ -286,7 +351,7 @@
       : '';
     Object.keys(groups).forEach((language) => {
       if (groups[language].length === 0) return;
-      html += `<optgroup label="${languageLabel(language)}">` + groups[language].map((set) =>
+      html += `<optgroup label="${escapeHtml(languageLabel(language))}">` + groups[language].map((set) =>
         `<option value="${escapeHtml(set.id)}" ${set.id === state.activeSetId ? 'selected' : ''}>${escapeHtml(set.name)} (${set.termCount})</option>`
       ).join('') + '</optgroup>';
     });
@@ -294,19 +359,31 @@
     el.btnDeleteSet.hidden = state.activeSetId === ALL_SETS_ID;
     el.btnEditLanguage.disabled = state.activeSetId === ALL_SETS_ID;
     el.manualSetSelect.innerHTML = state.sets.map((set) =>
-      `<option value="${escapeHtml(set.id)}">${escapeHtml(set.name)} · ${languageLabel(set.language)}</option>`
+      `<option value="${escapeHtml(set.id)}">${escapeHtml(set.name)} · ${escapeHtml(languageLabel(set.language))}</option>`
     ).join('');
     if (state.activeSetId !== ALL_SETS_ID) el.manualSetSelect.value = state.activeSetId;
   }
 
   async function switchActiveSet(setId) {
+    if (switchingSet) return false;
+    switchingSet = true;
+    const previous = state.activeSetId;
+    const previousData = {terms:state.terms,chunkMap:state.chunkMap,termMeta:state.termMeta};
+    try {
     state.activeSetId = setId;
-    await state.store.setActiveSetId(setId);
     await loadActiveSetTerms();
+    await state.store.setActiveSetId(setId);
     renderSetSwitcher();
     if (state.screen === 'home' || state.screen === 'learn' || state.screen === 'review' || state.screen === 'progress') {
       showScreen(state.screen);
     }
+    return true;
+    } catch (error) {
+      state.activeSetId = previous;
+      Object.assign(state, previousData);
+      renderSetSwitcher(); showToast('Набор не удалось открыть. Проверь соединение и попробуй снова.', 5000);
+      return false;
+    } finally { switchingSet = false; }
   }
 
   async function loadActiveSetTerms() {
@@ -327,7 +404,7 @@
     state.chunkMap = new Map();
     state.termMeta = new Map();
     bundles.forEach(({ set, data }) => {
-      const setLanguage = set.language || inferSetLanguage(data.terms);
+      const setLanguage = Ex.canonicalLanguage(set.language || inferSetLanguage(data.terms));
       set.language = setLanguage;
       data.terms.forEach((rawTerm) => {
         const term = normalizeStoredTerm(rawTerm);
@@ -345,13 +422,15 @@
 
   function renderHome() {
     renderDailyGoal();
+    const saved = readJournal('session');
+    const sessionLabel = id => saved?.setId === id && saved.queue?.length ? 'Продолжить занятие' : 'Начать занятие';
     const sortedSets = [...state.sets].sort((a, b) => setCreationTime(b) - setCreationTime(a));
     const allSets = state.sets.length > 1 ? `
       <div class="home-set-card">
         <button class="home-set-open" type="button" data-open-set="${ALL_SETS_ID}">
           <span class="home-set-language">ОБЩЕЕ ЗАНЯТИЕ</span>
           <strong>Все наборы</strong>
-          <span>${state.sets.reduce((count, set) => count + (Number(set.termCount) || 0), 0)} слов · Начать занятие</span>
+          <span>${state.sets.reduce((count, set) => count + (Number(set.termCount) || 0), 0)} слов · ${sessionLabel(ALL_SETS_ID)}</span>
         </button>
       </div>
     ` : '';
@@ -360,7 +439,7 @@
         <button class="home-set-open" type="button" data-open-set="${escapeHtml(set.id)}">
           <span class="home-set-language">${escapeHtml(languageLabel(set.language))}</span>
           <strong>${escapeHtml(set.name)}</strong>
-          <span>${Number(set.termCount) || 0} слов · Начать занятие</span>
+          <span>${Number(set.termCount) || 0} слов · ${sessionLabel(set.id)}</span>
           <span class="home-set-created">${setCreationTime(set) ? `Добавлен ${escapeHtml(new Date(set.createdAt).toLocaleDateString('ru-RU'))}` : 'Дата добавления неизвестна'}</span>
         </button>
         <button class="home-set-delete" type="button" data-delete-set="${escapeHtml(set.id)}" aria-label="Удалить набор ${escapeHtml(set.name)}">Удалить</button>
@@ -375,7 +454,7 @@
   }
 
   function selectedLanguage(select, input) {
-    return select.value === 'other' ? input.value.trim() : select.value;
+    return Ex.canonicalLanguage(select.value === 'other' ? input.value.trim() : select.value);
   }
 
   function openImportScreen(mode) {
@@ -419,7 +498,7 @@
       if (errors.length > 10) html += `<p>...и ещё ${errors.length - 10} ошибок.</p>`;
     }
     if (warnings.length) {
-      html += `<p><strong>Предупреждения:</strong> ${warnings.length} строк пропущено (дубликаты).</p>`;
+      html += `<p><strong>Предупреждения:</strong></p><ul>${warnings.slice(0, 10).map(warning => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>`;
     }
     el.importErrors.innerHTML = html;
   }
@@ -429,6 +508,10 @@
   }
 
   async function handleCsvText(text, defaultName) {
+    if (importBusy) return;
+    importBusy = true;
+    el.btnLoadDemo.disabled = true; el.fileInput.disabled = true; el.btnCancelImport.disabled = true;
+    try {
     const { items, errors, warnings } = Csv.parseCsv(text);
     renderImportErrors(errors, warnings);
     if (errors.length || items.length === 0) return;
@@ -452,6 +535,13 @@
     showToast(missingArticles
       ? `Набор создан. Проверь артикли у ${missingArticles} немецких слов в «Прогрессе».`
       : `Набор «${name}» создан: ${terms.length} слов`, missingArticles ? 5200 : 2200);
+    } catch (error) {
+      console.error('Import failed', error);
+      renderImportErrors(['Не удалось сохранить набор. Старые наборы не изменены. Проверь соединение и попробуй снова.'], []);
+    } finally {
+      importBusy = false;
+      el.btnLoadDemo.disabled = false; el.fileInput.disabled = false; el.btnCancelImport.disabled = false;
+    }
   }
 
   function updateManualLanguageHint() {
@@ -461,6 +551,8 @@
   }
 
   function openSurface(mode, termId) {
+    modalFocus = document.activeElement;
+    $('#app').inert = true;
     el.setMenu.hidden = true;
     el.btnSetMenu.setAttribute('aria-expanded', 'false');
     el.surfaceBackdrop.hidden = false;
@@ -510,13 +602,20 @@
   }
 
   function closeSurface() {
+    if (el.surfaceBackdrop.hidden) return;
     el.surfaceBackdrop.hidden = true;
     el.manualSetSelect.disabled = false;
     state.editingTermId = null;
+    $('#app').inert = false;
+    if (modalFocus?.isConnected && modalFocus.getClientRects().length) modalFocus.focus();
+    else el.btnSetMenu.focus();
   }
 
   async function addWordManually(event) {
     event.preventDefault();
+    if (el.btnSaveWord.disabled) return;
+    el.btnSaveWord.disabled = true;
+    try {
     const setId = el.manualSetSelect.value;
     const term = el.manualTerm.value.trim();
     const translation = el.manualTranslation.value.trim();
@@ -550,10 +649,13 @@
     if (state.screen === 'learn') startLearnSession();
     if (state.screen === 'review') renderReview();
     if (state.screen === 'progress') renderProgress();
+    } catch (error) { console.error(error); showToast('Слово не сохранено. Проверь соединение и попробуй ещё раз.', 5000); }
+    finally { el.btnSaveWord.disabled = false; }
   }
 
   async function changeSetLanguage(event) {
     event.preventDefault();
+    try {
     if (!state.activeSetId || state.activeSetId === ALL_SETS_ID) return;
     const language = selectedLanguage(el.editLanguageSelect, el.editLanguageOther);
     if (!language) { el.editLanguageOther.reportValidity(); return; }
@@ -564,6 +666,7 @@
     if (state.screen === 'home') renderHome();
     closeSurface();
     showToast('Язык набора изменён');
+    } catch (error) { console.error(error); showToast('Язык не сохранён. Попробуй ещё раз.', 5000); }
   }
 
   // ---------------------------------------------------------------------
@@ -572,7 +675,7 @@
   function computeStats(terms) {
     const now = Date.now();
     const total = terms.length;
-    const learned = terms.filter((t) => t.status === 'learned').length;
+    const learned = terms.filter((t) => t.status === 'learned' && !Srs.needsReminder(t, state.settings.intervalsDays, now)).length;
     const brandNew = terms.filter((t) => t.status === 'new').length;
     const learning = total - learned - brandNew;
     const dueToday = terms.filter((t) => t.status !== 'new' && Srs.isDue(t, now)).length;
@@ -583,7 +686,7 @@
   }
 
   function isDifficult(t) {
-    return t.attempts >= 2 && t.status !== 'learned' && (t.correct_count / t.attempts) < 0.6;
+    return t.last_review_failed || (t.attempts >= 2 && t.status !== 'learned' && (t.correct_count / t.attempts) < 0.6);
   }
 
   // ---------------------------------------------------------------------
@@ -612,6 +715,12 @@
     return lastTwo >= 11 && lastTwo <= 14 ? 'ответов' : last === 1 ? 'ответ' : last >= 2 && last <= 4 ? 'ответа' : 'ответов';
   }
 
+  function wordCountLabel(count) {
+    const lastTwo = count % 100;
+    const last = count % 10;
+    return `${count} ${lastTwo >= 11 && lastTwo <= 14 ? 'слов' : last === 1 ? 'слово' : last >= 2 && last <= 4 ? 'слова' : 'слов'}`;
+  }
+
   function renderDailyGoal() {
     const goal = dailyGoal();
     const count = Srs.currentDailyCount(state.activity);
@@ -634,12 +743,47 @@
     return activityWriteQueue;
   }
 
-  function startLearnSession(customQueue) {
-    const queue = customQueue || buildLearnQueue(state.terms);
+  function startLearnSession(customQueue, forceNew = false) {
+    const saved = forceNew ? null : readJournal('session');
+    if (saved?.version === 1 && saved.setId === state.activeSetId && Date.now() - saved.updatedAt < 7 * 86400000 &&
+        Array.isArray(saved.queue) && saved.queue.length && saved.queue.every(id => getTermById(id)) &&
+        Number.isInteger(saved.initialLength) && saved.initialLength >= saved.queue.length &&
+        Array.isArray(saved.reviewResults) && Array.isArray(saved.studied) &&
+        (saved.reviewKinds === null || (Array.isArray(saved.reviewKinds) && saved.reviewKinds.every(pair => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && Array.isArray(pair[1]) && pair[1].every(kind => ['multiple_choice','type_answer','spelling','flashcard'].includes(kind))))) &&
+        saved.reviewResults.every(pair => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && Number.isInteger(pair[1]?.count) && pair[1].count >= 0 && pair[1].count <= 3 && typeof pair[1].correct === 'boolean')) {
+      try {
+        state.session.reviewKinds = saved.reviewKinds ? new Map(saved.reviewKinds) : null;
+        state.session.reviewResults = new Map(saved.reviewResults);
+        state.session.studied = new Set(saved.studied);
+        state.session.queue = saved.queue; state.session.initialLength = saved.initialLength;
+        state.session.answered = false; state.session.pendingStudyTermId = null;
+        if (saved.pendingNext) {
+          const completed = saved.pendingNext.ids;
+          if (!Array.isArray(completed)) throw new Error('Invalid session');
+          completed.forEach(id => {
+            const index = state.session.queue.indexOf(id);
+            if (index >= 0) state.session.queue.splice(index, 1);
+            if (state.session.reviewKinds) state.session.reviewKinds.get(id)?.shift();
+            else if (!saved.pendingNext.correct) state.session.queue.push(id);
+          });
+        }
+        saveSession(); renderDailyGoal(); renderLearnStep(); showToast('Продолжаем незавершённое занятие'); return;
+      } catch { writeJournal('session', null); }
+    }
+    const plan = customQueue ? Ex.buildReviewPlan(customQueue, state.terms) : null;
+    const queue = plan ? plan.map((task) => task.termId) : buildLearnQueue(state.terms);
+    state.session.reviewKinds = plan ? new Map() : null;
+    plan?.forEach(task => {
+      if (!state.session.reviewKinds.has(task.termId)) state.session.reviewKinds.set(task.termId, []);
+      state.session.reviewKinds.get(task.termId).push(task.kind);
+    });
+    state.session.reviewResults = new Map();
+    state.session.studied = new Set();
     state.session.queue = queue;
     state.session.initialLength = Math.max(queue.length, 1);
     state.session.answered = false;
     state.session.pendingStudyTermId = null;
+    saveSession();
     renderDailyGoal();
     renderLearnStep();
   }
@@ -648,8 +792,14 @@
     const done = state.session.initialLength - state.session.queue.length;
     const pct = Math.max(0, Math.min(100, Math.round((done / state.session.initialLength) * 100)));
     el.learnProgressFill.style.width = pct + '%';
+    const track = el.learnProgressFill.parentElement;
+    track.setAttribute('role', 'progressbar');
+    track.setAttribute('aria-label', 'Прогресс занятия');
+    track.setAttribute('aria-valuemin', '0');
+    track.setAttribute('aria-valuemax', String(state.session.initialLength));
+    track.setAttribute('aria-valuenow', String(done));
     el.learnCounter.textContent = state.session.queue.length
-      ? `Осталось: ${state.session.queue.length}`
+      ? `${done} / ${state.session.initialLength} заданий${state.session.reviewKinds ? ` · ${wordCountLabel(state.session.reviewKinds.size)}` : ''}`
       : 'Готово';
   }
 
@@ -659,6 +809,11 @@
     if (state.session.queue.length === 0) {
       el.exerciseCard.hidden = true;
       el.learnEmpty.hidden = false;
+      el.learnEmpty.querySelector('h2').textContent = state.session.reviewKinds ? 'Повторение завершено!' : 'На сегодня всё!';
+      const failed = [...state.session.reviewResults.values()].filter((result) => !result.correct).length;
+      el.learnEmpty.querySelector('p').textContent = state.session.reviewKinds
+        ? `Заданий выполнено: ${state.session.initialLength}. Слов в занятии: ${state.session.reviewKinds.size}. ${failed ? `Нужно закрепить: ${failed}. Они доступны во вкладке «Сложные».` : 'Все слова успешно повторены.'}`
+        : 'Новых и просроченных карточек для изучения сейчас нет. Загляни в «Повторение» или возвращайся позже.';
       return;
     }
     el.exerciseCard.hidden = false;
@@ -677,7 +832,8 @@
     }
 
     // Phase 1: never-attempted words get a Study card before any test.
-    if (term.attempts === 0) {
+    if (term.attempts === 0 && !state.session.studied.has(term.id)) {
+      state.session.studied.add(term.id);
       state.session.answered = false;
       renderStudyCard(term);
       return;
@@ -688,14 +844,15 @@
     const frontIds = state.session.queue.slice(0, 4);
     const frontTerms = frontIds.map(getTermById).filter(Boolean);
     const matchingLanguages = new Set(frontTerms.map((term) => (state.termMeta.get(term.id) || {}).language));
-    if (frontTerms.length === 4 && matchingLanguages.size === 1 && frontTerms.every((t) => t.attempts > 0) && Math.random() < 0.2) {
+    if (!state.session.reviewKinds && frontTerms.length === 4 && Ex.buildMatching(frontTerms).termIds.length === 4 && matchingLanguages.size === 1 && frontTerms.every((t) => t.attempts > 0) && Math.random() < 0.2) {
       renderMatching(frontTerms);
       return;
     }
 
     state.session.answered = false;
     try {
-      const exercise = prepareExercise(Ex.pickExerciseType(term, state.terms), term);
+      const kind = state.session.reviewKinds?.get(term.id)?.[0];
+      const exercise = prepareExercise(kind ? Ex.buildExercise(kind, term, state.terms) : Ex.pickExerciseType(term, state.terms), term);
       renderExercise(exercise);
     } catch (error) {
       console.error('Could not render exercise', error, term.id);
@@ -715,37 +872,48 @@
     skip.type = 'button';
     skip.className = 'btn btn-ghost';
     skip.textContent = 'Пропустить';
-    skip.addEventListener('click', () => { state.session.queue.shift(); renderLearnStep(); });
+    skip.addEventListener('click', () => {
+      const id = state.session.queue.shift(); state.session.reviewKinds?.get(id)?.shift();
+      state.session.reviewResults.set(id, { count: 0, correct: false }); saveSession(); renderLearnStep();
+    });
     card.append(heading, details, skip);
   }
 
   function advanceAfterAnswer(isCorrect) {
     const id = state.session.queue.shift();
-    if (!isCorrect) state.session.queue.push(id); // resurface later this session
-    setTimeout(renderLearnStep, 550);
+    if (state.session.reviewKinds) state.session.reviewKinds.get(id)?.shift();
+    else if (!isCorrect) state.session.queue.push(id); // resurface later this session
+    saveSession();
+    setTimeout(() => { if (state.screen === 'learn') renderLearnStep(); }, 550);
   }
 
   async function scoreTerm(termId, isCorrect) {
     const term = getTermById(termId);
     if (!term) return;
-    Srs.applyAnswer(term, isCorrect, state.settings.intervalsDays);
-    state.activity = Srs.recordPractice(state.activity);
-    const activityWrite = saveActivity();
-    renderDailyGoal();
-
-    // Persist just the one chunk this term lives in, not the whole set —
-    // keeps writes small and fast against Telegram CloudStorage's per-key
-    // size limit.
-    const location = state.chunkMap.get(termId);
-    if (location && location.chunkIdx !== undefined) {
-      const chunkTerms = state.terms.filter((candidate) => {
-        const candidateLocation = state.chunkMap.get(candidate.id);
-        return candidateLocation && candidateLocation.setId === location.setId && candidateLocation.chunkIdx === location.chunkIdx;
-      });
-      await Promise.all([activityWrite, state.store.saveChunk(location.setId, location.chunkIdx, chunkTerms)]);
+    if (state.session.reviewKinds) {
+      const result = state.session.reviewResults.get(termId) || { count: 0, correct: true };
+      result.count++;
+      result.correct = result.correct && isCorrect;
+      state.session.reviewResults.set(termId, result);
+      if (!isCorrect) { term.last_review_failed = true; if (term.status === 'new') term.status = 'learning'; }
+      // Three checks in one sitting count as one spaced review, not three levels.
+      if (result.count === 3) {
+        Srs.applyAnswer(term, result.correct, state.settings.intervalsDays);
+        term.last_review_failed = !result.correct;
+      }
     } else {
-      await activityWrite;
+      Srs.applyAnswer(term, isCorrect, state.settings.intervalsDays);
+      term.last_review_failed = !isCorrect;
     }
+    state.activity = Srs.recordPractice(state.activity);
+    renderDailyGoal();
+    const location = state.chunkMap.get(termId);
+    if (location) {
+      pendingWrites.push({ setId: location.setId, term: JSON.parse(JSON.stringify(term)), activity: { ...state.activity } });
+      pendingBackupAvailable = writeJournal('pending', pendingWrites);
+    }
+    saveSession({ ids: [termId], correct: isCorrect });
+    await flushPendingWrites();
   }
 
   function appendTermSource(card, term) {
@@ -805,6 +973,11 @@
 
   // ---- Phase 2: immediate test on the same word -----------------------
   function renderPhase2Test(term) {
+    if (state.session.reviewKinds) {
+      state.session.answered = false;
+      renderExercise(prepareExercise(Ex.buildExercise(state.session.reviewKinds.get(term.id)[0], term, state.terms), term));
+      return;
+    }
     const canMultipleChoice = state.terms.filter((t) => t.id !== term.id).length >= 3;
     const type = canMultipleChoice && Math.random() < 0.5 ? 'multiple_choice' : 'type_answer';
     const exercise = type === 'multiple_choice'
@@ -818,7 +991,7 @@
 
   function prepareExercise(exercise, term) {
     const meta = term && state.termMeta.get(term.id);
-    exercise.answerLanguage = exercise.answerSide === 'term' && meta ? meta.language : 'ru';
+    exercise.answerLanguage = exercise.answerSide === 'term' && meta ? Ex.canonicalLanguage(meta.language) : 'ru';
     return exercise;
   }
 
@@ -1011,7 +1184,6 @@
         if (event.isComposing) return;
         input.value = Array.from(input.value).slice(-1).join('');
         if (input.value && position < inputs.length - 1) inputs[position + 1].input.focus();
-        if (inputs.every((item) => item.input.value)) checkBtn.click();
       });
       input.addEventListener('keydown', (event) => {
         if (event.key === 'Backspace' && !input.value && position > 0) {
@@ -1026,8 +1198,7 @@
         if (!letters.length) return;
         event.preventDefault();
         letters.forEach((letter, offset) => { if (inputs[position + offset]) inputs[position + offset].input.value = letter; });
-        if (inputs.every((item) => item.input.value)) checkBtn.click();
-        else inputs[Math.min(position + letters.length, inputs.length - 1)].input.focus();
+        inputs[Math.min(position + letters.length, inputs.length - 1)].input.focus();
       });
     });
     card.appendChild(actions);
@@ -1062,14 +1233,33 @@
     btn.className = 'btn btn-primary';
     btn.textContent = 'Далее';
     btn.style.marginTop = '8px';
-    btn.addEventListener('click', onNext);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; await saveQueue;
+      if (saveFailure) { btn.disabled = false; showToast('Сначала повтори сохранение прогресса.', 4000); return; }
+      onNext();
+    });
     card.appendChild(btn);
+  }
+
+  function offerRetry(exercise, isCorrect, feedback) {
+    if (isCorrect) return false;
+    exercise.failedAttempts = (exercise.failedAttempts || 0) + 1;
+    if (exercise.failedAttempts >= 3) return false;
+    feedback.hidden = false;
+    feedback.className = 'feedback bad';
+    feedback.textContent = `Пока неверно. Попробуй ещё раз · осталось попыток: ${3 - exercise.failedAttempts}`;
+    return true;
   }
 
   function handleMultipleChoiceAnswer(chosen, exercise, grid, feedback) {
     if (state.session.answered) return;
-    state.session.answered = true;
     const isCorrect = chosen === exercise.correctAnswer;
+    if (offerRetry(exercise, isCorrect, feedback)) {
+      const wrong = Array.from(grid.children).find((btn) => btn.textContent === chosen);
+      if (wrong) { wrong.classList.add('incorrect'); wrong.disabled = true; }
+      return;
+    }
+    state.session.answered = true;
     Array.from(grid.children).forEach((btn) => {
       btn.classList.add('disabled-choice');
       if (btn.textContent === exercise.correctAnswer) btn.classList.add('correct');
@@ -1083,8 +1273,19 @@
 
   function handleTypedAnswer(value, exercise, input, feedback, checkBtn) {
     if (state.session.answered) return;
+    const isCorrect = Ex.answersMatch(value, exercise.correctAnswer, { language: exercise.answerLanguage, strict: exercise.kind === 'spelling_missing' });
+    if (!isCorrect && exercise.kind !== 'spelling_missing' && exercise.answerLanguage !== 'de' &&
+        Ex.isPossibleTypo(value, exercise.correctAnswer, { language: exercise.answerLanguage })) {
+      feedback.hidden = false; feedback.className = 'feedback bad';
+      feedback.textContent = 'Возможно, опечатка. Проверь написание — попытка не потрачена.';
+      input.focus(); return;
+    }
+    if (offerRetry(exercise, isCorrect, feedback)) {
+      const fields = Array.isArray(input) ? input : [input];
+      (fields.find((field) => Array.isArray(input) && field.value !== Array.from(exercise.correctAnswer)[exercise.missingPositions[fields.indexOf(field)]]) || fields[0]).focus();
+      return;
+    }
     state.session.answered = true;
-    const isCorrect = Ex.answersMatch(value, exercise.correctAnswer, { language: exercise.answerLanguage });
     (Array.isArray(input) ? input : [input]).forEach((field) => { field.disabled = true; });
     checkBtn.remove();
     showFeedback(feedback, isCorrect, exercise.correctAnswer,
@@ -1102,7 +1303,7 @@
 
     let assembled = [];
     const tileEls = exercise.tiles.map((unit, idx) => {
-      const tile = document.createElement('div');
+      const tile = document.createElement('button'); tile.type = 'button';
       tile.className = 'letter-tile';
       tile.textContent = unit;
       tile.addEventListener('click', () => {
@@ -1119,7 +1320,7 @@
     function renderAssembled() {
       assembledRow.innerHTML = '';
       assembled.forEach((a) => {
-        const t = document.createElement('div');
+        const t = document.createElement('button'); t.type = 'button';
         t.className = 'letter-tile';
         t.textContent = a.unit;
         t.addEventListener('click', () => {
@@ -1134,9 +1335,10 @@
 
     function checkScramble() {
       if (state.session.answered) return;
-      state.session.answered = true;
       const userAnswer = assembled.map((a) => a.unit).join(exercise.joinWith);
-      const isCorrect = Ex.answersMatch(userAnswer, exercise.correctAnswer, { language: exercise.answerLanguage });
+      const isCorrect = Ex.answersMatch(userAnswer, exercise.correctAnswer, { language: exercise.answerLanguage, strict: true });
+      if (offerRetry(exercise, isCorrect, feedback)) return;
+      state.session.answered = true;
       showFeedback(feedback, isCorrect, exercise.correctAnswer,
         !isCorrect && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
       scoreTerm(exercise.termId, isCorrect);
@@ -1254,13 +1456,15 @@
     let selectedLeft = null;
     let selectedRight = null;
     let solvedIds = new Set();
+    let checkingPair = false;
 
     function makeCell(item) {
-      const cell = document.createElement('div');
+      const cell = document.createElement('button'); cell.type = 'button';
       cell.className = 'match-cell';
       cell.textContent = item.text;
       cell.dataset.termId = item.termId;
       cell.dataset.side = item.side;
+      cell.setAttribute('aria-pressed', 'false');
       cell.addEventListener('click', () => onCellClick(cell, item));
       return cell;
     }
@@ -1283,15 +1487,17 @@
     card.appendChild(hintRow);
 
     function onCellClick(cell, item) {
-      if (cell.classList.contains('solved')) return;
+      if (checkingPair || cell.classList.contains('solved')) return;
       if (item.side === 'term') {
-        if (selectedLeft) selectedLeft.el.classList.remove('selected');
+        if (selectedLeft) { selectedLeft.el.classList.remove('selected'); selectedLeft.el.setAttribute('aria-pressed', 'false'); }
         selectedLeft = { el: cell, termId: item.termId };
         cell.classList.add('selected');
+        cell.setAttribute('aria-pressed', 'true');
       } else {
-        if (selectedRight) selectedRight.el.classList.remove('selected');
+        if (selectedRight) { selectedRight.el.classList.remove('selected'); selectedRight.el.setAttribute('aria-pressed', 'false'); }
         selectedRight = { el: cell, termId: item.termId };
         cell.classList.add('selected');
+        cell.setAttribute('aria-pressed', 'true');
       }
       if (selectedLeft && selectedRight) {
         if (selectedLeft.termId === selectedRight.termId) {
@@ -1299,14 +1505,18 @@
           selectedRight.el.classList.remove('selected');
           selectedLeft.el.classList.add('solved');
           selectedRight.el.classList.add('solved');
+          selectedLeft.el.disabled = true; selectedRight.el.disabled = true;
+          selectedLeft.el.setAttribute('aria-pressed', 'false'); selectedRight.el.setAttribute('aria-pressed', 'false');
           solvedIds.add(selectedLeft.termId);
           selectedLeft = null; selectedRight = null;
           if (solvedIds.size === exercise.termIds.length) finishMatching();
         } else {
           const wrongEls = [selectedLeft.el, selectedRight.el];
+          checkingPair = true;
           wrongEls.forEach((c) => c.classList.add('wrong'));
           setTimeout(() => {
-            wrongEls.forEach((c) => { c.classList.remove('wrong'); c.classList.remove('selected'); });
+            wrongEls.forEach((c) => { c.classList.remove('wrong'); c.classList.remove('selected'); c.setAttribute('aria-pressed', 'false'); });
+            checkingPair = false;
           }, 450);
           selectedLeft = null; selectedRight = null;
         }
@@ -1316,13 +1526,15 @@
     function finishMatching() {
       hintRow.remove();
       exercise.termIds.forEach((id) => scoreTerm(id, true));
+      saveSession({ ids: exercise.termIds, correct: true });
       const note = document.createElement('div');
       note.className = 'feedback ok';
       note.textContent = '✓ Все пары найдены!';
       card.appendChild(note);
       appendContinueButton(card, () => {
         state.session.queue = state.session.queue.filter((id) => !exercise.termIds.includes(id));
-        setTimeout(renderLearnStep, 50);
+        saveSession();
+        setTimeout(() => { if (state.screen === 'learn') renderLearnStep(); }, 50);
       });
     }
   }
@@ -1338,38 +1550,42 @@
     return Math.max(0, Math.min(state.reviewSize, poolSize));
   }
 
+  function quickReviewPool() {
+    return state.terms.filter((term) => Srs.needsReminder(term, state.settings.intervalsDays));
+  }
+
   function renderReviewSizeControl() {
-    const max = Math.max(1, state.terms.length);
+    const poolSize = quickReviewPool().length;
+    const max = Math.max(1, poolSize);
     const value = Math.max(1, Math.min(state.reviewSize, max));
     el.reviewSize.max = String(max);
     el.reviewSize.value = String(value);
-    el.reviewSize.disabled = state.terms.length === 0;
-    el.reviewSizeValue.value = String(state.terms.length ? value : 0);
-    el.reviewSizeValue.textContent = String(state.terms.length ? value : 0);
-    el.reviewSizeMax.textContent = String(state.terms.length);
-    el.reviewSize.style.setProperty('--range-progress', `${state.terms.length ? (max === 1 ? 100 : (value - 1) / (max - 1) * 100) : 0}%`);
-    el.reviewSize.setAttribute('aria-valuetext', `${state.terms.length ? value : 0} из ${state.terms.length} слов`);
+    el.reviewSize.disabled = poolSize === 0;
+    el.reviewSizeValue.value = String(poolSize ? value : 0);
+    el.reviewSizeValue.textContent = String(poolSize ? value : 0);
+    el.reviewSizeMax.textContent = String(poolSize);
+    el.reviewSize.style.setProperty('--range-progress', `${poolSize ? (max === 1 ? 100 : (value - 1) / (max - 1) * 100) : 0}%`);
+    el.reviewSize.setAttribute('aria-valuetext', `${poolSize ? value : 0} из ${poolSize} слов`);
   }
 
   function updateReviewSizeInput(rawValue) {
-    const max = Math.max(1, state.terms.length);
+    const max = Math.max(1, quickReviewPool().length);
     const raw = Math.max(1, Math.min(max, Number(rawValue) || 1));
     state.reviewSize = Math.round(raw);
     el.reviewSizeValue.value = String(state.reviewSize);
     el.reviewSizeValue.textContent = String(state.reviewSize);
     el.reviewSize.style.setProperty('--range-progress', `${max === 1 ? 100 : (raw - 1) / (max - 1) * 100}%`);
-    el.reviewSize.setAttribute('aria-valuetext', `${state.reviewSize} из ${state.terms.length} слов`);
-    const available = state.terms.filter((term) => term.attempts > 0).length;
-    el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(available || state.terms.length)}`;
+    el.reviewSize.setAttribute('aria-valuetext', `${state.reviewSize} из ${quickReviewPool().length} слов`);
+    el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(quickReviewPool().length)}`;
+    if (!el.btnStartReview.hidden) el.btnStartReview.textContent = `Повторить эти слова · ${effectiveReviewSize(filteredReviewTerms().filter((term) => Srs.needsReminder(term, state.settings.intervalsDays)).length)}`;
   }
 
   function renderReview() {
     const stats = computeStats(state.terms);
-    const availableNow = state.terms.filter((term) => term.attempts > 0);
-    const quickPoolSize = availableNow.length || state.terms.length;
+    const quickPoolSize = quickReviewPool().length;
     renderStreak();
     renderReviewSizeControl();
-    el.btnQuickReview.hidden = state.terms.length === 0;
+    el.btnQuickReview.hidden = quickPoolSize === 0;
     el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(quickPoolSize)}`;
     el.reviewStats.innerHTML =
       statTile(stats.learning, 'Учатся') +
@@ -1412,6 +1628,7 @@
 
   function renderReviewList() {
     const items = filteredReviewTerms();
+    const eligible = items.filter((term) => Srs.needsReminder(term, state.settings.intervalsDays));
     if (items.length === 0) {
       el.reviewList.innerHTML = `<div class="empty-note">${EMPTY_NOTES[state.reviewFilter]}</div>`;
       el.btnStartReview.hidden = true;
@@ -1427,22 +1644,22 @@
         ${badgeFor(t)}
       </div>
     `).join('');
-    el.btnStartReview.hidden = false;
-    el.btnStartReview.textContent = `Повторить эти слова · ${effectiveReviewSize(items.length)}`;
+    el.btnStartReview.hidden = eligible.length === 0;
+    el.btnStartReview.textContent = `Повторить эти слова · ${effectiveReviewSize(eligible.length)}`;
     el.btnStartReview.onclick = () => {
-      const ids = items.slice(0, effectiveReviewSize(items.length)).map((t) => t.id);
-      showScreen('learn');
-      startLearnSession(ids);
+      const ids = Ex.shuffle(eligible).slice(0, effectiveReviewSize(eligible.length)).map((t) => t.id);
+      showScreen('learn', ids);
     };
   }
 
-  function startQuickReview() {
-    const attempted = state.terms.filter((term) => term.attempts > 0);
-    const pool = attempted.length ? attempted : state.terms;
+  async function startQuickReview() {
+    const pool = quickReviewPool();
     const ids = Ex.shuffle(pool).slice(0, effectiveReviewSize(pool.length)).map((term) => term.id);
     if (ids.length === 0) return;
-    showScreen('learn');
-    startLearnSession(ids);
+    const saved = readJournal('session');
+    if (saved?.queue?.length && saved.setId === state.activeSetId &&
+        !await confirmDialog('Начать новое повторение вместо незавершённого занятия? Прогресс слов останется.', {title:'Новое повторение?',action:'Начать'})) return;
+    showScreen('learn', ids, true);
   }
 
   function renderFlashcard() {
@@ -1515,10 +1732,8 @@
 
     el.wordTable.innerHTML = sorted.map((t) => {
       const dots = Array.from({ length: intervals.length }, (_, i) =>
-        `<span class="mastery-dot ${i < t.mastery_level ? 'filled' : ''}"></span>`).join('');
-      const nextReview = t.status === 'learned' && t.mastery_level >= intervals.length
-        ? '—'
-        : new Date(t.due_date).toLocaleDateString('ru-RU');
+        `<span class="mastery-dot ${i < Srs.effectiveMastery(t, intervals) ? 'filled' : ''}"></span>`).join('');
+      const nextReview = new Date(t.due_date).toLocaleDateString('ru-RU');
       return `
         <div class="word-row">
           <div class="word-row-top">
@@ -1668,6 +1883,10 @@
       btn.addEventListener('click', () => showScreen(btn.dataset.screen));
     });
     el.btnBackHome.addEventListener('click', () => showScreen('home'));
+    $('#btnRestartLearn').addEventListener('click', async () => {
+      const reviewIds = state.session.reviewKinds ? [...state.session.reviewKinds.keys()] : undefined;
+      if (await confirmDialog('Начать новое занятие вместо незавершённого? Сохранённый прогресс слов останется.', { title: 'Новое занятие?', action: 'Начать' })) startLearnSession(reviewIds, true);
+    });
     el.btnHomeAddSet.addEventListener('click', () => openImportScreen('add'));
     el.homeSetList.addEventListener('pointerdown', (event) => {
       const card = event.target.closest('.home-set-card');
@@ -1724,7 +1943,7 @@
       if (performance.now() < suppressSetOpenUntil) return;
       const card = openButton.closest('.home-set-card');
       if (card.classList.contains('revealed')) { card.classList.remove('revealed'); return; }
-      if (state.activeSetId !== openButton.dataset.openSet) await switchActiveSet(openButton.dataset.openSet);
+      if (state.activeSetId !== openButton.dataset.openSet && !await switchActiveSet(openButton.dataset.openSet)) return;
       showScreen('learn');
     });
     el.homeSetList.addEventListener('focusin', (event) => {
@@ -1801,8 +2020,8 @@
       if (delta === undefined && event.key !== 'Home' && event.key !== 'End') return;
       event.preventDefault();
       const next = event.key === 'Home' ? 1 : event.key === 'End'
-        ? Math.max(1, state.terms.length) : state.reviewSize + delta;
-      el.reviewSize.value = String(Math.max(1, Math.min(state.terms.length, next)));
+        ? Math.max(1, quickReviewPool().length) : state.reviewSize + delta;
+      el.reviewSize.value = String(Math.max(1, Math.min(quickReviewPool().length, next)));
       updateReviewSizeInput(el.reviewSize.value);
       try { localStorage.setItem('vocab_review_size', String(state.reviewSize)); } catch (e) { /* optional preference */ }
     });
@@ -1828,6 +2047,14 @@
       }
     });
     document.addEventListener('keydown', (event) => {
+      const modal = [el.confirmBackdrop, el.surfaceBackdrop, el.flashcardBackdrop].find(node => !node.hidden);
+      if (modal && event.key === 'Tab') {
+        const controls = [...modal.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')].filter(node => node.getClientRects().length);
+        const first = controls[0], last = controls[controls.length - 1];
+        if (first && (!modal.contains(document.activeElement) || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last))) {
+          event.preventDefault(); (event.shiftKey ? last : first).focus();
+        }
+      }
       if (!el.flashcardBackdrop.hidden) {
         if (event.key === 'Escape') { closeFlashcards(); return; }
         if (event.key === 'ArrowRight') { event.preventDefault(); moveFlashcard(1); return; }
@@ -1877,13 +2104,11 @@
     initTelegram();
     registerOfflineApp();
 
-    const INIT_TIMEOUT_MS = 2000;
-
-    // The actual storage bootstrap (store creation + settings + sets list
-    // + active set id). Wrapped in its own function so it can be raced
-    // against a timeout below — a stuck CloudStorage callback must never
-    // be able to leave the loading screen up forever.
     async function loadStorage() {
+      showScreen('loading');
+      $('#loadingError').hidden = true;
+      $('#btnRetryLoad').disabled = true;
+      try {
       state.store = await window.VocabStorage.VocabStore.create();
       el.syncBadge.hidden = false;
       el.syncBadge.className = 'sync-badge ' + state.store.backendName;
@@ -1891,37 +2116,16 @@
         ? 'Синхронизировано с Telegram'
         : 'Локальный режим (без Telegram) — прогресс останется в этом браузере';
 
-      state.settings = await state.store.getSettings();
-      state.activity = await state.store.getActivity();
+      [state.settings, state.activity] = await Promise.all([state.store.getSettings(), state.store.getActivity()]);
       await refreshSetsList();
       state.activeSetId = await state.store.getActiveSetId();
-    }
-
-    let timedOut = false;
-    try {
-      const timeoutPromise = new Promise((resolve) => {
-        setTimeout(() => { timedOut = true; resolve('timeout'); }, INIT_TIMEOUT_MS);
-      });
-      const outcome = await Promise.race([loadStorage().then(() => 'done'), timeoutPromise]);
-      if (outcome === 'timeout') {
-        console.warn('Storage init exceeded', INIT_TIMEOUT_MS, 'ms — proceeding without waiting further.');
-      }
-    } catch (e) {
-      console.error('Storage init failed:', e);
-    }
-
-    console.log('Storage loaded:', state.sets);
-    console.log('Active set:', state.activeSetId);
-
-    // Nothing usable yet (no sets, a still-empty result because we timed
-    // out, or an error above) — go straight to the import screen instead
-    // of leaving the loading screen up.
-    const totalWords = state.sets.reduce((sum, s) => sum + (s.termCount || 0), 0);
-    if (!state.store || state.sets.length === 0 || totalWords === 0) {
-      if (timedOut) console.warn('Proceeding to import screen after timeout with no confirmed sets.');
+      const pending = readJournal('pending');
+      pendingWrites = Array.isArray(pending) ? pending.filter(job => job && typeof job.setId === 'string' && job.term?.id && job.activity && typeof job.activity === 'object') : [];
+      await flushPendingWrites();
+      if (state.sets.length === 0) {
       openImportScreen('first');
       return;
-    }
+      }
 
     if (!state.activeSetId || (state.activeSetId !== ALL_SETS_ID && !state.sets.find((s) => s.id === state.activeSetId))) {
       state.activeSetId = state.sets[0].id;
@@ -1929,21 +2133,26 @@
       catch (e) { console.error('Failed to persist active set id:', e); }
     }
 
-    try {
       await loadActiveSetTerms();
-    } catch (e) {
-      console.error('Failed to load active set terms:', e);
-    }
-
-    // Defensive fallback: sets existed but this particular set somehow has
-    // no terms — still don't get stuck, send the user to add words.
-    if (state.terms.length === 0) {
-      openImportScreen('add');
-      return;
-    }
-
+      pendingWrites.forEach(job => {
+        const term = getTermById(job.term.id);
+        if (term && state.termMeta.get(term.id)?.setId === job.setId) Object.assign(term, job.term);
+        state.activity = job.activity;
+      });
+      if (!pendingWrites.length) state.activity = await state.store.getActivity();
     renderSetSwitcher();
     showScreen('home');
+      } catch (error) {
+        console.error('Storage load failed', error);
+        $('#loadingError').hidden = false;
+        $('#loadingErrorText').textContent = 'Не удалось загрузить словарь. Данные не удалены. ' + (error.message || 'Проверь соединение и попробуй снова.');
+      } finally { $('#btnRetryLoad').disabled = false; }
+    }
+    $('#btnRetryLoad').addEventListener('click', loadStorage);
+    el.dropzone.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); if (!importBusy) el.fileInput.click(); }
+    });
+    await loadStorage();
   }
 
   document.addEventListener('DOMContentLoaded', boot);
