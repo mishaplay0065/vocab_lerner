@@ -12,7 +12,7 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%234255ff'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-family='Arial' font-size='34' font-weight='700' fill='white'%3EV%3C/text%3E%3C/svg%3E">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="style.css?v=15">
+<link rel="stylesheet" href="style.css?v=16">
 </head>
 <body>
 
@@ -236,6 +236,11 @@
       <p class="field-note" id="manualGermanHint" hidden>Немецкие существительные добавляй с артиклем и заглавной буквы: <strong>der Tisch</strong>, <strong>die Lampe</strong>, <strong>das Haus</strong>.</p>
       <label class="field-label" for="manualContext">Контекст <span class="optional">необязательно</span></label>
       <input id="manualContext" class="text-input" autocomplete="off" placeholder="Пример использования">
+      <details class="format-help" id="manualAliasesDetails">
+        <summary>Другие правильные переводы</summary>
+        <label class="field-label" for="manualAliases">По одному варианту в строке</label>
+        <textarea id="manualAliases" class="text-input" rows="3" placeholder="Например: засесть за работу"></textarea>
+      </details>
       <button class="btn btn-primary btn-block" id="btnSaveWord" type="submit">Добавить в набор</button>
     </form>
 
@@ -277,10 +282,10 @@
 
 <div class="toast" id="toast" hidden></div>
 
-<script src="storage.js?v=15"></script>
-<script src="csv.js?v=15"></script>
-<script src="srs.js?v=15"></script>
-<script src="exercises.js?v=15"></script>
-<script src="app.js?v=15"></script>
+<script src="storage.js?v=16"></script>
+<script src="csv.js?v=16"></script>
+<script src="srs.js?v=16"></script>
+<script src="exercises.js?v=16"></script>
+<script src="app.js?v=16"></script>
 </body>
 </html>

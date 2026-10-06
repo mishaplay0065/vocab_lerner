@@ -30,9 +30,11 @@
       id: raw.id || (crypto.randomUUID ? crypto.randomUUID() : 'id_' + now + '_' + Math.random().toString(36).slice(2)),
       term: raw.term,
       translation: raw.translation,
+      translationAliases: Array.isArray(raw.translationAliases) ? raw.translationAliases.slice(0, 30) : [],
       context: raw.context || '',
       attempts: 0,
       correct_count: 0,
+      practice_points: 0,
       mastery_level: 0,
       due_date: now,       // immediately eligible for learning
       last_seen: null,

@@ -62,7 +62,7 @@
       pendingStudyTermId: null // set while Phase 1 (study) is showing, before Phase 2 test
     },
     reviewFilter: 'due',
-    reviewSize: 10,
+    reviewSize: 8,
     flashcards: { items: [], index: 0, revealed: false },
     editingTermId: null
   };
@@ -228,8 +228,8 @@
   }
 
   function initReviewSize() {
-    let saved = 10;
-    try { saved = Number(localStorage.getItem('vocab_review_size')) || 10; } catch (e) { /* optional preference */ }
+    let saved = 8;
+    try { saved = Number(localStorage.getItem('vocab_review_size')) || 8; } catch (e) { /* optional preference */ }
     state.reviewSize = Math.max(1, Math.round(saved));
   }
 
@@ -284,6 +284,8 @@
     term.context = String(term.context ?? '');
     term.attempts = Number.isFinite(Number(term.attempts)) ? Math.max(0, Math.floor(Number(term.attempts))) : 0;
     term.correct_count = Number.isFinite(Number(term.correct_count)) ? Math.min(term.attempts, Math.max(0, Math.floor(Number(term.correct_count)))) : 0;
+    term.practice_points = Number.isFinite(Number(term.practice_points)) ? Math.max(0, Math.floor(Number(term.practice_points))) : term.correct_count;
+    term.translationAliases = Array.isArray(term.translationAliases) ? term.translationAliases.filter(value => typeof value === 'string' && value.trim()).slice(0, 30) : [];
     term.mastery_level = Number.isFinite(Number(term.mastery_level)) ? Math.min(state.settings.intervalsDays.length, Math.max(0, Math.floor(Number(term.mastery_level)))) : 0;
     term.due_date = Number.isFinite(Number(term.due_date)) ? Number(term.due_date) : Date.now();
     term.created_at = Number.isFinite(Number(term.created_at)) ? Number(term.created_at) : Date.now();
@@ -565,6 +567,7 @@
       el.btnSaveWord.textContent = 'Добавить в набор';
       el.manualSetSelect.disabled = false;
       el.addWordForm.reset();
+      el.manualAliasesDetails.open = false;
       if (state.activeSetId !== ALL_SETS_ID) el.manualSetSelect.value = state.activeSetId;
       updateManualLanguageHint();
       setTimeout(() => el.manualTerm.focus(), 60);
@@ -583,6 +586,8 @@
       el.manualTerm.value = term.term;
       el.manualTranslation.value = term.translation;
       el.manualContext.value = term.context || '';
+      el.manualAliases.value = (term.translationAliases || []).join('\n');
+      el.manualAliasesDetails.open = Boolean(term.translationAliases?.length);
       updateManualLanguageHint();
       el.manualGermanHint.hidden = meta.language !== 'de';
       setTimeout(() => el.manualTerm.focus(), 60);
@@ -620,12 +625,16 @@
     const term = el.manualTerm.value.trim();
     const translation = el.manualTranslation.value.trim();
     const context = el.manualContext.value.trim();
+    const translationAliases = [...new Map(el.manualAliases.value.split(/\r?\n/)
+      .map(value => value.trim()).filter(Boolean)
+      .filter(value => Ex.normalize(value) !== Ex.normalize(translation))
+      .map(value => [Ex.normalize(value), value])).values()].slice(0, 30);
     if (!setId || !term || !translation) return;
 
     const editingTerm = state.editingTermId ? getTermById(state.editingTermId) : null;
     const termObject = editingTerm
-      ? { ...editingTerm, term, translation, context }
-      : Srs.makeTerm({ term, translation, context });
+      ? { ...editingTerm, term, translation, context, translationAliases }
+      : Srs.makeTerm({ term, translation, context, translationAliases });
     const result = editingTerm
       ? await state.store.updateTerm(setId, termObject)
       : await state.store.addTerm(setId, termObject);
@@ -896,8 +905,9 @@
       result.correct = result.correct && isCorrect;
       state.session.reviewResults.set(termId, result);
       if (!isCorrect) { term.last_review_failed = true; if (term.status === 'new') term.status = 'learning'; }
-      // Three checks in one sitting count as one spaced review, not three levels.
-      if (result.count === 3) {
+      // Each task changes practice progress. Long-term SRS advances only once
+      // after the last check: three same-day checks are not three spaced days.
+      if (state.session.reviewKinds.get(termId)?.length === 1) {
         Srs.applyAnswer(term, result.correct, state.settings.intervalsDays);
         term.last_review_failed = !result.correct;
       }
@@ -905,6 +915,7 @@
       Srs.applyAnswer(term, isCorrect, state.settings.intervalsDays);
       term.last_review_failed = !isCorrect;
     }
+    term.practice_points = Math.max(0, (Number(term.practice_points) || 0) + (isCorrect ? 1 : -1));
     state.activity = Srs.recordPractice(state.activity);
     renderDailyGoal();
     const location = state.chunkMap.get(termId);
@@ -1234,8 +1245,13 @@
     btn.textContent = 'Далее';
     btn.style.marginTop = '8px';
     btn.addEventListener('click', async () => {
-      btn.disabled = true; await saveQueue;
-      if (saveFailure) { btn.disabled = false; showToast('Сначала повтори сохранение прогресса.', 4000); return; }
+      btn.disabled = true;
+      // A durable local journal lets the next task start while the cloud write
+      // completes. When journalling is unavailable, wait for confirmation.
+      if (!pendingBackupAvailable) await saveQueue;
+      if (saveFailure && !pendingBackupAvailable) {
+        btn.disabled = false; showToast('Сначала повтори сохранение прогресса.', 4000); return;
+      }
       onNext();
     });
     card.appendChild(btn);
@@ -1273,25 +1289,59 @@
 
   function handleTypedAnswer(value, exercise, input, feedback, checkBtn) {
     if (state.session.answered) return;
-    const isCorrect = Ex.answersMatch(value, exercise.correctAnswer, { language: exercise.answerLanguage, strict: exercise.kind === 'spelling_missing' });
+    el.exerciseCard.querySelectorAll('.alias-accept').forEach(button => button.remove());
+    const term = getTermById(exercise.termId);
+    const options = { language: exercise.answerLanguage, strict: exercise.kind === 'spelling_missing',
+      alternatives: exercise.answerSide === 'translation' ? term?.translationAliases : [] };
+    const isCorrect = Ex.answersMatch(value, exercise.correctAnswer, options);
     if (!isCorrect && exercise.kind !== 'spelling_missing' && exercise.answerLanguage !== 'de' &&
-        Ex.isPossibleTypo(value, exercise.correctAnswer, { language: exercise.answerLanguage })) {
+        Ex.isPossibleTypo(value, exercise.correctAnswer, options)) {
       feedback.hidden = false; feedback.className = 'feedback bad';
       feedback.textContent = 'Возможно, опечатка. Проверь написание — попытка не потрачена.';
       input.focus(); return;
     }
+    const finish = correct => {
+      state.session.answered = true;
+      (Array.isArray(input) ? input : [input]).forEach(field => { field.disabled = true; });
+      checkBtn.remove();
+      showFeedback(feedback, correct, exercise.correctAnswer,
+        !correct && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
+      scoreTerm(exercise.termId, correct);
+      appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(correct));
+    };
+    const offerAlias = () => {
+      const accept = document.createElement('button'); accept.type = 'button'; accept.className = 'btn btn-ghost alias-accept';
+      accept.textContent = 'Мой перевод тоже верен';
+      accept.onclick = async () => {
+        if (!await confirmDialog(`Засчитать «${value.trim()}» и сохранить его как вариант перевода этого слова?`, {title:'Добавить перевод?',action:'Засчитать'})) return;
+        term.translationAliases ||= [];
+        if (!term.translationAliases.some(alias => Ex.normalize(alias) === Ex.normalize(value))) {
+          term.translationAliases.push(value.trim());
+          term.translationAliases = term.translationAliases.slice(-30);
+        }
+        el.exerciseCard.querySelectorAll('.alias-accept, .alias-reject').forEach(button => button.remove());
+        finish(true);
+      };
+      el.exerciseCard.append(accept);
+    };
+    if (!isCorrect && exercise.kind === 'type_answer' && exercise.answerSide === 'translation' && value.trim() &&
+        (exercise.failedAttempts || 0) >= 2) {
+      feedback.hidden = false; feedback.className = 'feedback bad';
+      feedback.innerHTML = `В наборе указан ответ: <strong>${escapeHtml(exercise.correctAnswer)}</strong>. Если твой перевод тоже верен, добавь его как вариант.`;
+      checkBtn.remove();
+      const reject = document.createElement('button'); reject.type = 'button'; reject.className = 'btn btn-ghost alias-reject';
+      reject.textContent = 'Считать ошибкой';
+      reject.onclick = () => { el.exerciseCard.querySelector('.alias-accept')?.remove(); reject.remove(); finish(false); };
+      offerAlias(); el.exerciseCard.append(reject);
+      return;
+    }
     if (offerRetry(exercise, isCorrect, feedback)) {
+      if (!isCorrect && exercise.kind === 'type_answer' && exercise.answerSide === 'translation' && value.trim()) offerAlias();
       const fields = Array.isArray(input) ? input : [input];
       (fields.find((field) => Array.isArray(input) && field.value !== Array.from(exercise.correctAnswer)[exercise.missingPositions[fields.indexOf(field)]]) || fields[0]).focus();
       return;
     }
-    state.session.answered = true;
-    (Array.isArray(input) ? input : [input]).forEach((field) => { field.disabled = true; });
-    checkBtn.remove();
-    showFeedback(feedback, isCorrect, exercise.correctAnswer,
-      !isCorrect && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
-    scoreTerm(exercise.termId, isCorrect);
-    appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(isCorrect));
+    finish(isCorrect);
   }
 
   function renderScramble(card, exercise, feedback) {
@@ -1745,8 +1795,8 @@
           </div>
           <div class="term-source">${escapeHtml(termSourceLabel(t))}</div>
           <div class="word-row-details">
-            <span>Попыток: ${t.attempts}</span>
-            <span>Верно: ${t.correct_count}</span>
+            <span>Практика: ${t.practice_points || 0} баллов</span>
+            <span>Память: ${Srs.effectiveMastery(t, intervals)} из ${intervals.length} интервалов</span>
             <span>Следующее повторение: ${nextReview}</span>
             <span class="mastery-dots">${dots}</span>
           </div>
@@ -1861,6 +1911,8 @@
       manualTerm: $('#manualTerm'),
       manualTranslation: $('#manualTranslation'),
       manualContext: $('#manualContext'),
+      manualAliases: $('#manualAliases'),
+      manualAliasesDetails: $('#manualAliasesDetails'),
       manualGermanHint: $('#manualGermanHint'),
       btnSaveWord: $('#btnSaveWord'),
       setLanguageForm: $('#setLanguageForm'),

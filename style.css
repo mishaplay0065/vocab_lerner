@@ -198,6 +198,8 @@ body{
 .format-help summary{cursor:pointer; font-weight:600; color:var(--accent-dark);}
 .format-help p{margin:8px 0 0; color:var(--ink-soft); line-height:1.5;}
 .format-help code{background:var(--surface-alt); padding:1px 5px; border-radius:4px;}
+.format-help .field-label{display:block; margin:12px 0 6px;}
+.format-help textarea{width:100%; resize:vertical; min-height:76px;}
 
 .import-errors{
   background:var(--danger-soft);

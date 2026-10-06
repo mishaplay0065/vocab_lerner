@@ -56,6 +56,12 @@
     return Boolean(left && right && left === right);
   }
 
+  function sameIgnoringEnglishInfinitive(a, b) {
+    const left = normalize(a).replace(/^to\s+/, '');
+    const right = normalize(b).replace(/^to\s+/, '');
+    return Boolean(left && right && left === right && (normalize(a).startsWith('to ') || normalize(b).startsWith('to ')));
+  }
+
   function wordsPreservingCase(value) {
     return (value || '')
       .trim()
@@ -123,9 +129,9 @@
 
   function answersMatch(a, b, options) {
     const actual = [String(a || '').trim()].filter(Boolean);
-    const expected = rawAnswerVariants(b);
+    const expected = [String(b || '').trim(), ...rawAnswerVariants(b), ...(options?.alternatives || [])];
     const language = options && options.language;
-    if (actual.length === 0 || expected.length === 0) return false;
+    if (actual.length === 0 || expected.every(value => !value)) return false;
     return actual.some((givenRaw) => expected.some((answerRaw) => {
       if (language === 'de' && !validGermanForm(givenRaw, answerRaw)) return false;
       const given = normalize(givenRaw);
@@ -133,13 +139,14 @@
       if (options && options.strict) return given === answer;
       return given === answer ||
         (language !== 'de' && sameIgnoringLeadingEnglishArticle(given, answer)) ||
+        (language === 'en' && sameIgnoringEnglishInfinitive(given, answer)) ||
         sameWordsInAnyOrder(given, answer);
     }));
   }
 
   function isPossibleTypo(a, b, options) {
     if (!normalize(a) || answersMatch(a, b, options)) return false;
-    return rawAnswerVariants(b).some(answer => closeEnough(normalize(a), normalize(answer)) || fuzzyRussianWordsInAnyOrder(a, answer));
+    return [...rawAnswerVariants(b), ...(options?.alternatives || [])].some(answer => closeEnough(normalize(a), normalize(answer)) || fuzzyRussianWordsInAnyOrder(a, answer));
   }
 
   function canonicalLanguage(value) {
@@ -244,11 +251,14 @@
   }
 
   function buildSpelling(term) {
-    const word = term.term.trim();
-    if (!/[a-zA-Zа-яёА-ЯЁäöüßÄÖÜ]/.test(word)) return buildSpellingScramble(term);
+    // A slash/comma means alternative answers, not one enormous spelling item.
+    const variants = rawAnswerVariants(term.term);
+    const word = (variants[0] || term.term).trim();
+    const spellingTerm = { ...term, term: word };
+    if (!/[a-zA-Zа-яёА-ЯЁäöüßÄÖÜ]/.test(word)) return buildSpellingScramble(spellingTerm);
     // Very short single words are easier to scramble than to blank out.
-    if (word.length <= 3 && !word.includes(' ')) return buildSpellingScramble(term);
-    return Math.random() < 0.5 ? buildSpellingMissingLetters(term) : buildSpellingScramble(term);
+    if (word.length <= 3 && !word.includes(' ')) return buildSpellingScramble(spellingTerm);
+    return Math.random() < 0.5 ? buildSpellingMissingLetters(spellingTerm) : buildSpellingScramble(spellingTerm);
   }
 
   // ---- 4. Flashcard ------------------------------------------------
@@ -305,18 +315,37 @@
     }
   }
 
-  function buildReviewPlan(ids, pool) {
+  function buildReviewPlan(ids, pool, budget = 20) {
     const unique = [...new Set(ids)];
     const byId = new Map(pool.map(term => [term.id, term]));
     const translations = new Set(pool.map(term => normalize(term.translation)));
     const kinds = new Map(unique.map((id) => {
       const term = byId.get(id);
       const count = translations.size - Number(translations.has(normalize(term?.translation)));
-      return [id, shuffle([count >= 3 ? 'multiple_choice' : 'flashcard', 'type_answer', 'spelling'])];
+      const first = count >= 3 ? 'multiple_choice' : 'flashcard';
+      return [id, term?.status === 'new' ? [first, 'type_answer', 'spelling'] : ['type_answer', 'spelling', first]];
     }));
+    const goals = new Map(unique.map(id => [id, 1]));
+    const priority = [...unique].sort((a, b) => {
+      const weight = id => {
+        const term = byId.get(id);
+        return (term?.last_review_failed ? 100 : 0) + (term?.status === 'new' ? 50 : 0) + (term?.status === 'learned' ? 0 : 25) - (term?.mastery_level || 0);
+      };
+      return weight(b) - weight(a);
+    });
+    let spare = Math.max(0, budget - unique.length);
+    for (let round = 2; round <= 3 && spare; round++) {
+      for (const id of priority) {
+        const term = byId.get(id);
+        if (goals.get(id) !== round - 1 || (term?.status === 'learned' && !term?.last_review_failed) ||
+            (round === 3 && !(term?.last_review_failed || term?.status === 'new'))) continue;
+        goals.set(id, round); spare--;
+        if (!spare) break;
+      }
+    }
     const plan = [];
     for (let round = 0; round < 3; round++) {
-      let batch = shuffle(unique);
+      let batch = shuffle(unique.filter(id => goals.get(id) > round));
       if (batch.length > 1 && batch[0] === plan[plan.length - 1]?.termId) batch.push(batch.shift());
       plan.push(...batch.map((termId) => ({ termId, kind: kinds.get(termId)[round] })));
     }

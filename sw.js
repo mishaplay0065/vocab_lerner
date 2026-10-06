@@ -1,14 +1,14 @@
-const CACHE_NAME = 'vocab-app-v15';
+const CACHE_NAME = 'vocab-app-v16';
 const APP_FILES = [
   './',
   './index.html',
-  './style.css?v=15',
+  './style.css?v=16',
   './InterVariable.woff2',
-  './storage.js?v=15',
-  './csv.js?v=15',
-  './srs.js?v=15',
-  './exercises.js?v=15',
-  './app.js?v=15',
+  './storage.js?v=16',
+  './csv.js?v=16',
+  './srs.js?v=16',
+  './exercises.js?v=16',
+  './app.js?v=16',
   './manifest.webmanifest',
   './apple-touch-icon.png',
   './icon-192.png',
