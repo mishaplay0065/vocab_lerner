@@ -9,8 +9,8 @@
  *   mastery_level: 0..intervals.length. Advances by exactly one on every
  *   correct answer and is what drives the schedule (not correct_count,
  *   which is kept only for stats). A term becomes "learned" once
- *   mastery_level reaches intervals.length (10 by default) — i.e. after
- *   10 successful *spaced* reviews, because after each correct answer the
+ *   mastery_level reaches intervals.length (5 by default) — i.e. after
+ *   5 successful *spaced* reviews, because after each correct answer the
  *   due_date is pushed into the future by the matching interval, so the
  *   same item can't be re-answered and re-credited repeatedly inside one
  *   sitting.
@@ -21,7 +21,7 @@
  * -----------------------------------------------------------------------
  */
 (function (global) {
-  const DEFAULT_INTERVALS_DAYS = [1, 2, 4, 7, 14, 21, 30, 45, 60, 90];
+  const DEFAULT_INTERVALS_DAYS = [1, 3, 7, 14, 30];
   const RELEARN_MINUTES = 10;
 
   function makeTerm(raw) {
@@ -35,6 +35,7 @@
       attempts: 0,
       correct_count: 0,
       practice_points: 0,
+      srs_version: 2,
       mastery_level: 0,
       due_date: now,       // immediately eligible for learning
       last_seen: null,
@@ -98,6 +99,21 @@
     return term.status !== 'learned' || effectiveMastery(term, intervals, now) < (intervals || DEFAULT_INTERVALS_DAYS).length;
   }
 
+  function masteryPercent(terms, intervals, now) {
+    intervals = intervals || DEFAULT_INTERVALS_DAYS;
+    if (!terms.length) return 0;
+    return Math.round(terms.reduce((sum, term) => sum + effectiveMastery(term, intervals, now), 0) /
+      (terms.length * intervals.length) * 100);
+  }
+
+  function reviewPriority(term, now) {
+    now = now ?? Date.now();
+    const overdueDays = Math.max(0, (now - (Number(term.due_date) || now)) / 86400000);
+    return (term.last_review_failed ? 100 : 0) +
+      (term.status !== 'new' && isDue(term, now) ? 30 : 0) +
+      Math.min(overdueDays, 30) - (Number(term.mastery_level) || 0);
+  }
+
   function isStale(term, days, now) {
     now = now || Date.now();
     if (!term.last_seen) return false;
@@ -147,6 +163,8 @@
     applyAnswer,
     isDue,
     effectiveMastery,
+    masteryPercent,
+    reviewPriority,
     needsReminder,
     isStale,
     statusFor,

@@ -1,7 +1,7 @@
 /** Copy-on-write storage with bounded operations; legacy v2 sets stay readable. */
 (function (global) {
   const PREFIX = 'vocabapp_v2_', PART_SIZE = 3500, MAX_PARTS = 900;
-  const INTERVALS = [1,2,4,7,14,21,30,45,60,90];
+  const INTERVALS = [1,3,7,14,30];
   class StorageError extends Error {
     constructor(message, code = 'storage') { super(message); this.name = 'StorageError'; this.code = code; }
   }
@@ -87,8 +87,8 @@
     async _cleanup(keys) { try { if (keys.length && !await this.backend.removeItems(keys)) console.warn('Unused storage parts remain', keys.length); } catch (error) { console.warn('Storage cleanup failed', error); } }
     async getSettings() {
       const value = parse(await this.backend.getItem('settings'), null), intervals = value?.intervalsDays;
-      return { intervalsDays:Array.isArray(intervals) && intervals.length > 0 && intervals.length <= 30 &&
-        intervals.every((day, i) => Number.isFinite(day) && day > 0 && (!i || day >= intervals[i - 1])) ? intervals : INTERVALS.slice(), masteryToLearn:10 };
+      return { intervalsDays:Array.isArray(intervals) && intervals.length === INTERVALS.length &&
+        intervals.every((day, i) => Number.isFinite(day) && day > 0 && (!i || day >= intervals[i - 1])) ? intervals : INTERVALS.slice(), masteryToLearn:INTERVALS.length };
     }
     async setSettings(value) { return this._mutate(async () => { await this._write('settings', JSON.stringify(value)); return true; }); }
     async getActivity() {

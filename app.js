@@ -39,6 +39,7 @@
 
   const SESSION_SIZE = 10;
   const ALL_SETS_ID = '__all__';
+  const LANGUAGE_SCOPE_PREFIX = '__language__:';
   const LANGUAGE_LABELS = { en: 'Английский', de: 'Немецкий', es: 'Испанский', fr: 'Французский', it: 'Итальянский', pt: 'Португальский', zh: 'Китайский', ja: 'Японский', ko: 'Корейский', ar: 'Арабский', hi: 'Хинди', ru: 'Русский', mixed: 'Смешанные' };
 
   // ---------------------------------------------------------------------
@@ -47,6 +48,7 @@
   const state = {
     store: null,
     sets: [],                 // [{id, name, createdAt, termCount, chunkCount}]
+    languageGroups: [],       // aggregate scopes; words stay in their original sets
     activeSetId: null,
     terms: [],                 // terms of the active set
     chunkMap: new Map(),       // termId -> {setId, chunkIdx}, for cheap partial saves
@@ -62,7 +64,7 @@
       pendingStudyTermId: null // set while Phase 1 (study) is showing, before Phase 2 test
     },
     reviewFilter: 'due',
-    reviewSize: 8,
+    reviewSize: 5,
     flashcards: { items: [], index: 0, revealed: false },
     editingTermId: null
   };
@@ -228,8 +230,8 @@
   }
 
   function initReviewSize() {
-    let saved = 8;
-    try { saved = Number(localStorage.getItem('vocab_review_size')) || 8; } catch (e) { /* optional preference */ }
+    let saved = 5;
+    try { saved = Number(localStorage.getItem('vocab_review_size')) || 5; } catch (e) { /* optional preference */ }
     state.reviewSize = Math.max(1, Math.round(saved));
   }
 
@@ -265,6 +267,31 @@
     return LANGUAGE_LABELS[language] || language || LANGUAGE_LABELS.mixed;
   }
 
+  function languageScopeId(language) {
+    return LANGUAGE_SCOPE_PREFIX + Ex.canonicalLanguage(language);
+  }
+
+  function scopeLanguage(id = state.activeSetId) {
+    return typeof id === 'string' && id.startsWith(LANGUAGE_SCOPE_PREFIX)
+      ? Ex.canonicalLanguage(id.slice(LANGUAGE_SCOPE_PREFIX.length)) : null;
+  }
+
+  function isAggregateScope(id = state.activeSetId) {
+    return id === ALL_SETS_ID || scopeLanguage(id) !== null;
+  }
+
+  function isValidScope(id) {
+    const language = scopeLanguage(id);
+    return language !== null
+      ? state.languageGroups.some(group => group.language === language)
+      : state.sets.some(set => set.id === id);
+  }
+
+  function defaultManualSetId() {
+    if (!isAggregateScope()) return state.activeSetId;
+    return state.termMeta.values().next().value?.setId || state.sets[0]?.id || '';
+  }
+
   function setCreationTime(set) {
     const date = new Date(set.createdAt);
     return Number.isFinite(date.getTime()) ? date.getTime() : 0;
@@ -286,7 +313,12 @@
     term.correct_count = Number.isFinite(Number(term.correct_count)) ? Math.min(term.attempts, Math.max(0, Math.floor(Number(term.correct_count)))) : 0;
     term.practice_points = Number.isFinite(Number(term.practice_points)) ? Math.max(0, Math.floor(Number(term.practice_points))) : term.correct_count;
     term.translationAliases = Array.isArray(term.translationAliases) ? term.translationAliases.filter(value => typeof value === 'string' && value.trim()).slice(0, 30) : [];
-    term.mastery_level = Number.isFinite(Number(term.mastery_level)) ? Math.min(state.settings.intervalsDays.length, Math.max(0, Math.floor(Number(term.mastery_level)))) : 0;
+    const storedLevel = Number.isFinite(Number(term.mastery_level)) ? Math.max(0, Math.floor(Number(term.mastery_level))) : 0;
+    // Map the old ten-step scale proportionally once, without discarding progress.
+    term.mastery_level = term.srs_version === 2
+      ? Math.min(state.settings.intervalsDays.length, storedLevel)
+      : Math.min(state.settings.intervalsDays.length, Math.round(storedLevel * state.settings.intervalsDays.length / 10));
+    term.srs_version = 2;
     term.due_date = Number.isFinite(Number(term.due_date)) ? Number(term.due_date) : Date.now();
     term.created_at = Number.isFinite(Number(term.created_at)) ? Number(term.created_at) : Date.now();
     term.status = term.attempts === 0 && term.last_review_failed ? 'learning' : Srs.statusFor(term, state.settings.intervalsDays);
@@ -347,10 +379,11 @@
   function renderSetSwitcher() {
     const groups = {};
     [...state.sets].sort((a, b) => setCreationTime(b) - setCreationTime(a))
-      .forEach((set) => (groups[set.language || 'mixed'] ||= []).push(set));
-    let html = state.sets.length > 1
-      ? `<option value="${ALL_SETS_ID}" ${state.activeSetId === ALL_SETS_ID ? 'selected' : ''}>Все наборы (${state.sets.reduce((sum, set) => sum + (set.termCount || 0), 0)})</option>`
-      : '';
+      .forEach((set) => (groups[Ex.canonicalLanguage(set.language) || 'mixed'] ||= []).push(set));
+    let html = state.languageGroups.map(group => {
+      const id = languageScopeId(group.language);
+      return `<option value="${escapeHtml(id)}" ${state.activeSetId === id ? 'selected' : ''}>Все наборы · ${escapeHtml(languageLabel(group.language))} (${group.termCount})</option>`;
+    }).join('');
     Object.keys(groups).forEach((language) => {
       if (groups[language].length === 0) return;
       html += `<optgroup label="${escapeHtml(languageLabel(language))}">` + groups[language].map((set) =>
@@ -358,16 +391,16 @@
       ).join('') + '</optgroup>';
     });
     el.setSelect.innerHTML = html;
-    el.btnDeleteSet.hidden = state.activeSetId === ALL_SETS_ID;
-    el.btnEditLanguage.disabled = state.activeSetId === ALL_SETS_ID;
+    el.btnDeleteSet.hidden = isAggregateScope();
+    el.btnEditLanguage.disabled = isAggregateScope();
     el.manualSetSelect.innerHTML = state.sets.map((set) =>
       `<option value="${escapeHtml(set.id)}">${escapeHtml(set.name)} · ${escapeHtml(languageLabel(set.language))}</option>`
     ).join('');
-    if (state.activeSetId !== ALL_SETS_ID) el.manualSetSelect.value = state.activeSetId;
+    el.manualSetSelect.value = defaultManualSetId();
   }
 
   async function switchActiveSet(setId) {
-    if (switchingSet) return false;
+    if (switchingSet || !isValidScope(setId)) return false;
     switchingSet = true;
     const previous = state.activeSetId;
     const previousData = {terms:state.terms,chunkMap:state.chunkMap,termMeta:state.termMeta};
@@ -395,31 +428,61 @@
       state.termMeta = new Map();
       return;
     }
-    const selectedSets = state.activeSetId === ALL_SETS_ID
-      ? state.sets
+    const selectedLanguage = scopeLanguage();
+    const selectedSets = selectedLanguage !== null
+      ? state.sets.filter(set => {
+        const language = Ex.canonicalLanguage(set.language);
+        return !language || language === 'mixed' || language === selectedLanguage;
+      })
       : state.sets.filter((set) => set.id === state.activeSetId);
     const bundles = await Promise.all(selectedSets.map(async (set) => ({
       set,
       data: await state.store.loadSetTerms(set.id)
     })));
-    state.terms = [];
-    state.chunkMap = new Map();
-    state.termMeta = new Map();
+    const terms = [], chunkMap = new Map(), termMeta = new Map();
     bundles.forEach(({ set, data }) => {
       const setLanguage = Ex.canonicalLanguage(set.language || inferSetLanguage(data.terms));
       set.language = setLanguage;
       data.terms.forEach((rawTerm) => {
         const term = normalizeStoredTerm(rawTerm);
         const language = setLanguage === 'mixed' ? detectTermLanguage(term.term, term.context) : setLanguage;
-        state.terms.push(term);
-        state.chunkMap.set(term.id, { setId: set.id, chunkIdx: data.chunkMap.get(term.id) });
-        state.termMeta.set(term.id, { setId: set.id, setName: set.name, language });
+        if (selectedLanguage !== null && language !== selectedLanguage) return;
+        terms.push(term);
+        chunkMap.set(term.id, { setId: set.id, chunkIdx: data.chunkMap.get(term.id) });
+        termMeta.set(term.id, { setId: set.id, setName: set.name, language });
       });
     });
+    Object.assign(state, { terms, chunkMap, termMeta });
   }
 
   async function refreshSetsList() {
-    state.sets = await state.store.listSets();
+    const sets = await state.store.listSets();
+    const memberships = await Promise.all(sets.map(async set => {
+      const language = Ex.canonicalLanguage(set.language);
+      if (language && language !== 'mixed') {
+        set.language = language;
+        return [{ language, count: Number(set.termCount) || 0 }];
+      }
+      // Only legacy/mixed sets need reading; declared languages use metadata.
+      const { terms } = await state.store.loadSetTerms(set.id);
+      set.language = language || inferSetLanguage(terms);
+      const counts = new Map();
+      terms.forEach(term => {
+        const detected = detectTermLanguage(term.term, term.context);
+        counts.set(detected, (counts.get(detected) || 0) + 1);
+      });
+      return [...counts].map(([language, count]) => ({ language, count }));
+    }));
+    const groups = new Map();
+    memberships.forEach(entries => entries.forEach(({ language, count }) => {
+      if (!count) return;
+      const group = groups.get(language) || { language, termCount: 0, setCount: 0 };
+      group.termCount += count;
+      group.setCount += 1;
+      groups.set(language, group);
+    }));
+    state.sets = sets;
+    state.languageGroups = [...groups.values()].sort((a, b) => languageLabel(a.language).localeCompare(languageLabel(b.language), 'ru'));
   }
 
   function renderHome() {
@@ -427,16 +490,15 @@
     const saved = readJournal('session');
     const sessionLabel = id => saved?.setId === id && saved.queue?.length ? 'Продолжить занятие' : 'Начать занятие';
     const sortedSets = [...state.sets].sort((a, b) => setCreationTime(b) - setCreationTime(a));
-    const allSets = state.sets.length > 1 ? `
-      <div class="home-set-card">
-        <button class="home-set-open" type="button" data-open-set="${ALL_SETS_ID}">
-          <span class="home-set-language">ОБЩЕЕ ЗАНЯТИЕ</span>
-          <strong>Все наборы</strong>
-          <span>${state.sets.reduce((count, set) => count + (Number(set.termCount) || 0), 0)} слов · ${sessionLabel(ALL_SETS_ID)}</span>
+    const allSets = state.languageGroups.map(group => `
+      <div class="home-set-card home-language-card">
+        <button class="home-set-open" type="button" data-open-set="${escapeHtml(languageScopeId(group.language))}">
+          <strong>${escapeHtml(languageLabel(group.language))}</strong>
+          <span>${wordCountLabel(group.termCount)} · ${sessionLabel(languageScopeId(group.language))}</span>
         </button>
       </div>
-    ` : '';
-    el.homeSetList.innerHTML = allSets + sortedSets.map((set) => `
+    `).join('');
+    el.homeSetList.innerHTML = (allSets ? `<section class="home-language-section" aria-label="Занятия по языкам"><h3>По языкам</h3><p>Все наборы одного языка — вместе.</p><div class="home-language-panel">${allSets}</div></section>` : '') + sortedSets.map((set) => `
       <div class="home-set-card">
         <button class="home-set-open" type="button" data-open-set="${escapeHtml(set.id)}">
           <span class="home-set-language">${escapeHtml(languageLabel(set.language))}</span>
@@ -568,7 +630,7 @@
       el.manualSetSelect.disabled = false;
       el.addWordForm.reset();
       el.manualAliasesDetails.open = false;
-      if (state.activeSetId !== ALL_SETS_ID) el.manualSetSelect.value = state.activeSetId;
+      el.manualSetSelect.value = defaultManualSetId();
       updateManualLanguageHint();
       setTimeout(() => el.manualTerm.focus(), 60);
       return;
@@ -644,7 +706,7 @@
     }
 
     await refreshSetsList();
-    if (state.activeSetId === setId || state.activeSetId === ALL_SETS_ID) await loadActiveSetTerms();
+    if (state.activeSetId === setId || isAggregateScope()) await loadActiveSetTerms();
     renderSetSwitcher();
     el.addWordForm.reset();
     el.manualSetSelect.value = setId;
@@ -665,7 +727,7 @@
   async function changeSetLanguage(event) {
     event.preventDefault();
     try {
-    if (!state.activeSetId || state.activeSetId === ALL_SETS_ID) return;
+    if (!state.activeSetId || isAggregateScope()) return;
     const language = selectedLanguage(el.editLanguageSelect, el.editLanguageOther);
     if (!language) { el.editLanguageOther.reportValidity(); return; }
     await state.store.updateSetLanguage(state.activeSetId, language);
@@ -728,6 +790,12 @@
     const lastTwo = count % 100;
     const last = count % 10;
     return `${count} ${lastTwo >= 11 && lastTwo <= 14 ? 'слов' : last === 1 ? 'слово' : last >= 2 && last <= 4 ? 'слова' : 'слов'}`;
+  }
+
+  function pointCountLabel(count) {
+    const lastTwo = count % 100;
+    const last = count % 10;
+    return `${count} ${lastTwo >= 11 && lastTwo <= 14 ? 'баллов' : last === 1 ? 'балл' : last >= 2 && last <= 4 ? 'балла' : 'баллов'}`;
   }
 
   function renderDailyGoal() {
@@ -820,8 +888,15 @@
       el.learnEmpty.hidden = false;
       el.learnEmpty.querySelector('h2').textContent = state.session.reviewKinds ? 'Повторение завершено!' : 'На сегодня всё!';
       const failed = [...state.session.reviewResults.values()].filter((result) => !result.correct).length;
+      const nextReviewAt = state.session.reviewKinds ? [...state.session.reviewKinds.keys()]
+        .map(getTermById).filter(Boolean).map(term => Number(term.due_date))
+        .filter(date => Number.isFinite(date) && date > Date.now())
+        .reduce((earliest, date) => Math.min(earliest, date), Infinity) : Infinity;
+      const nextReviewNote = Number.isFinite(nextReviewAt)
+        ? ` Следующее повторение по расписанию — ${new Date(nextReviewAt).toLocaleString('ru-RU', {day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'})}.`
+        : '';
       el.learnEmpty.querySelector('p').textContent = state.session.reviewKinds
-        ? `Заданий выполнено: ${state.session.initialLength}. Слов в занятии: ${state.session.reviewKinds.size}. ${failed ? `Нужно закрепить: ${failed}. Они доступны во вкладке «Сложные».` : 'Все слова успешно повторены.'}`
+        ? `Готово: ${wordCountLabel(state.session.reviewKinds.size)}, ${state.session.initialLength} заданий. ${failed ? `Стоит закрепить ещё ${wordCountLabel(failed)} во вкладке «Сложные».` : 'Все слова успешно повторены.'}${nextReviewNote}`
         : 'Новых и просроченных карточек для изучения сейчас нет. Загляни в «Повторение» или возвращайся позже.';
       return;
     }
@@ -1235,7 +1310,7 @@
     feedback.hidden = false;
     feedback.className = 'feedback ' + (isCorrect ? 'ok' : 'bad');
     feedback.innerHTML = isCorrect
-      ? '✓ Верно!'
+      ? `✓ Верно!${note ? `<span class="feedback-note">${escapeHtml(note)}</span>` : ''}`
       : `✗ Неверно. Правильный ответ: <strong>${escapeHtml(correctAnswer)}</strong>${note ? `<span class="feedback-note">${escapeHtml(note)}</span>` : ''}`;
   }
 
@@ -1305,7 +1380,9 @@
       (Array.isArray(input) ? input : [input]).forEach(field => { field.disabled = true; });
       checkBtn.remove();
       showFeedback(feedback, correct, exercise.correctAnswer,
-        !correct && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
+        correct && exercise.answerLanguage === 'en' && Ex.isEnglishSpellingVariant(value, exercise.correctAnswer)
+          ? 'Британский и американский варианты написания равнозначны.'
+          : !correct && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
       scoreTerm(exercise.termId, correct);
       appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(correct));
     };
@@ -1604,6 +1681,11 @@
     return state.terms.filter((term) => Srs.needsReminder(term, state.settings.intervalsDays));
   }
 
+  function chooseReviewTerms(pool, count) {
+    const now = Date.now();
+    return Ex.shuffle(pool).sort((a, b) => Srs.reviewPriority(b, now) - Srs.reviewPriority(a, now)).slice(0, count);
+  }
+
   function renderReviewSizeControl() {
     const poolSize = quickReviewPool().length;
     const max = Math.max(1, poolSize);
@@ -1664,6 +1746,8 @@
   }
 
   function badgeFor(term) {
+    if (term.status === 'learned' && Srs.needsReminder(term, state.settings.intervalsDays))
+      return '<span class="badge badge-learning">Пора повторить</span>';
     if (term.status === 'learned') return '<span class="badge badge-learned">Изучено</span>';
     if (term.status === 'new') return '<span class="badge badge-new">Новое</span>';
     return '<span class="badge badge-learning">Учится</span>';
@@ -1697,14 +1781,14 @@
     el.btnStartReview.hidden = eligible.length === 0;
     el.btnStartReview.textContent = `Повторить эти слова · ${effectiveReviewSize(eligible.length)}`;
     el.btnStartReview.onclick = () => {
-      const ids = Ex.shuffle(eligible).slice(0, effectiveReviewSize(eligible.length)).map((t) => t.id);
+      const ids = chooseReviewTerms(eligible, effectiveReviewSize(eligible.length)).map((t) => t.id);
       showScreen('learn', ids);
     };
   }
 
   async function startQuickReview() {
     const pool = quickReviewPool();
-    const ids = Ex.shuffle(pool).slice(0, effectiveReviewSize(pool.length)).map((term) => term.id);
+    const ids = chooseReviewTerms(pool, effectiveReviewSize(pool.length)).map((term) => term.id);
     if (ids.length === 0) return;
     const saved = readJournal('session');
     if (saved?.queue?.length && saved.setId === state.activeSetId &&
@@ -1770,11 +1854,11 @@
       statTile(remaining, 'Осталось') +
       statTile(stats.successRate + '%', 'Успешность');
 
-    const pct = stats.total ? Math.round((stats.learned / stats.total) * 100) : 0;
-    el.progressBarFill.style.width = pct + '%';
-    el.progressBarLabel.textContent = `${pct}% слов выучено (${stats.learned} из ${stats.total})`;
-
     const intervals = state.settings.intervalsDays;
+    const pct = Srs.masteryPercent(state.terms, intervals);
+    el.progressBarFill.style.width = pct + '%';
+    el.progressBarLabel.textContent = `${pct}% общего освоения · изучено ${stats.learned} из ${stats.total} слов`;
+
     const sorted = [...state.terms].sort((a, b) => {
       const order = { learning: 0, new: 1, learned: 2 };
       return order[a.status] - order[b.status] || a.term.localeCompare(b.term);
@@ -1795,7 +1879,7 @@
           </div>
           <div class="term-source">${escapeHtml(termSourceLabel(t))}</div>
           <div class="word-row-details">
-            <span>Практика: ${t.practice_points || 0} баллов</span>
+            <span>Практика: ${pointCountLabel(t.practice_points || 0)}</span>
             <span>Память: ${Srs.effectiveMastery(t, intervals)} из ${intervals.length} интервалов</span>
             <span>Следующее повторение: ${nextReview}</span>
             <span class="mastery-dots">${dots}</span>
@@ -1942,7 +2026,7 @@
     el.btnHomeAddSet.addEventListener('click', () => openImportScreen('add'));
     el.homeSetList.addEventListener('pointerdown', (event) => {
       const card = event.target.closest('.home-set-card');
-      if (!card || event.target.closest('.home-set-delete')) return;
+      if (!card || !card.querySelector('[data-delete-set]') || event.target.closest('.home-set-delete')) return;
       setSwipe = { card, x: event.clientX, y: event.clientY, dragging: false, wasRevealed: card.classList.contains('revealed') };
     });
     el.homeSetList.addEventListener('pointermove', (event) => {
@@ -2125,7 +2209,7 @@
   }
 
   async function deleteActiveSet(setId = state.activeSetId) {
-    if (!setId || setId === ALL_SETS_ID) return;
+    if (!setId || isAggregateScope(setId)) return;
     const setName = (state.sets.find((s) => s.id === setId) || {}).name || 'этот набор';
     const ok = await confirmDialog(`Удалить набор «${setName}» и весь его прогресс?`);
     if (!ok) return;
@@ -2133,7 +2217,7 @@
       if (!await state.store.deleteSet(setId)) throw new Error('Delete failed');
       await refreshSetsList();
       state.activeSetId = await state.store.getActiveSetId();
-      if (!state.sets.some((set) => set.id === state.activeSetId)) {
+      if (!isValidScope(state.activeSetId)) {
         state.activeSetId = state.sets[0]?.id || null;
         await state.store.setActiveSetId(state.activeSetId || '');
       }
@@ -2179,8 +2263,10 @@
       return;
       }
 
-    if (!state.activeSetId || (state.activeSetId !== ALL_SETS_ID && !state.sets.find((s) => s.id === state.activeSetId))) {
-      state.activeSetId = state.sets[0].id;
+    if (!isValidScope(state.activeSetId)) {
+      // Retire the old multilingual scope without changing any word data.
+      state.activeSetId = state.activeSetId === ALL_SETS_ID && state.languageGroups.length
+        ? languageScopeId(state.languageGroups[0].language) : state.sets[0].id;
       try { await state.store.setActiveSetId(state.activeSetId); }
       catch (e) { console.error('Failed to persist active set id:', e); }
     }
@@ -2188,7 +2274,7 @@
       await loadActiveSetTerms();
       pendingWrites.forEach(job => {
         const term = getTermById(job.term.id);
-        if (term && state.termMeta.get(term.id)?.setId === job.setId) Object.assign(term, job.term);
+        if (term && state.termMeta.get(term.id)?.setId === job.setId) Object.assign(term, normalizeStoredTerm(job.term));
         state.activity = job.activity;
       });
       if (!pendingWrites.length) state.activity = await state.store.getActivity();

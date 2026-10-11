@@ -62,6 +62,46 @@
     return Boolean(left && right && left === right && (normalize(a).startsWith('to ') || normalize(b).startsWith('to ')));
   }
 
+  // Curated UK/US equivalents. A blanket s/z replacement would turn distinct
+  // words such as "prized" and "prised" into false positives.
+  const englishSpellingVariants = new Map();
+  function registerEnglishVariant(us, uk) {
+    englishSpellingVariants.set(us, us);
+    englishSpellingVariants.set(uk, us);
+  }
+  for (const [us, uk] of [
+    ['demoralize', 'demoralise'], ['organize', 'organise'],
+    ['realize', 'realise'], ['recognize', 'recognise'],
+    ['criticize', 'criticise'], ['apologize', 'apologise'],
+    ['emphasize', 'emphasise'], ['specialize', 'specialise'],
+    ['normalize', 'normalise'], ['maximize', 'maximise'],
+    ['minimize', 'minimise'], ['analyze', 'analyse'],
+    ['paralyze', 'paralyse'], ['memorize', 'memorise']
+  ]) {
+    registerEnglishVariant(us, uk);
+    registerEnglishVariant(`${us}d`, `${uk}d`);
+    registerEnglishVariant(`${us}s`, `${uk}s`);
+    registerEnglishVariant(`${us.slice(0, -1)}ing`, `${uk.slice(0, -1)}ing`);
+  }
+  for (const [us, uk] of [
+    ['color', 'colour'], ['colors', 'colours'], ['colored', 'coloured'],
+    ['favor', 'favour'], ['favorite', 'favourite'], ['honor', 'honour'],
+    ['humor', 'humour'], ['neighbor', 'neighbour'], ['behavior', 'behaviour'],
+    ['center', 'centre'], ['centers', 'centres'], ['theater', 'theatre'],
+    ['defense', 'defence'], ['offense', 'offence'], ['gray', 'grey'],
+    ['catalog', 'catalogue'], ['dialog', 'dialogue'],
+    ['traveling', 'travelling'], ['traveled', 'travelled'], ['traveler', 'traveller'],
+    ['canceling', 'cancelling'], ['canceled', 'cancelled']
+  ]) registerEnglishVariant(us, uk);
+
+  function isEnglishSpellingVariant(a, b) {
+    const left = normalize(a).split(' ');
+    const right = normalize(b).split(' ');
+    return left.length === right.length && left.some((word, i) => word !== right[i]) &&
+      left.every((word, i) => word === right[i] ||
+        (englishSpellingVariants.has(word) && englishSpellingVariants.get(word) === englishSpellingVariants.get(right[i])));
+  }
+
   function wordsPreservingCase(value) {
     return (value || '')
       .trim()
@@ -136,10 +176,11 @@
       if (language === 'de' && !validGermanForm(givenRaw, answerRaw)) return false;
       const given = normalize(givenRaw);
       const answer = normalize(answerRaw);
-      if (options && options.strict) return given === answer;
+      if (options && options.strict) return given === answer || (language === 'en' && isEnglishSpellingVariant(given, answer));
       return given === answer ||
         (language !== 'de' && sameIgnoringLeadingEnglishArticle(given, answer)) ||
         (language === 'en' && sameIgnoringEnglishInfinitive(given, answer)) ||
+        (language === 'en' && isEnglishSpellingVariant(given, answer)) ||
         sameWordsInAnyOrder(given, answer);
     }));
   }
@@ -364,6 +405,7 @@
     normalize,
     answerVariants,
     answersMatch,
+    isEnglishSpellingVariant,
     isPossibleTypo,
     canonicalLanguage,
     buildMultipleChoice,
