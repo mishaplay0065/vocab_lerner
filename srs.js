@@ -136,14 +136,65 @@
   }
 
   function recordPractice(activity, today) {
-    const previous = activity || {};
-    const day = today || localDay();
-    if (previous.lastDay === day) {
-      return { ...previous, dailyCount: (previous.dailyCount || 0) + 1 };
-    }
-    const consecutive = dayDistance(previous.lastDay, day) === 1;
-    const streak = consecutive ? (previous.streak || 0) + 1 : 1;
-    return { ...previous, lastDay: day, streak, longest: Math.max(previous.longest || 0, streak), dailyCount: 1 };
+    const previous = mergeActivity(activity), day = today || localDay();
+    const sourceId = activity?.sourceId || 'browser';
+    const days = { ...(previous.sources[sourceId] || {}) };
+    days[day] = (days[day] || 0) + 1;
+    return { ...mergeActivity(previous, {version:3,sources:{[sourceId]:days}}), sourceId };
+  }
+
+  function validDay(day) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(day || '') &&
+      Number.isFinite(Date.parse(day + 'T12:00:00Z')) && new Date(day + 'T12:00:00Z').toISOString().slice(0,10) === day;
+  }
+
+  function shiftDay(day, offset) {
+    const date = new Date(day + 'T12:00:00Z');
+    date.setUTCDate(date.getUTCDate() + offset);
+    return date.toISOString().slice(0,10);
+  }
+
+  // Grow-only per-device counters: replay uses max, different devices add.
+  // Legacy counters are a baseline, never another copy of new daily answers.
+  function mergeActivity(...values) {
+    const sources = {}, legacyDays = {}, inferred = new Set();
+    let dailyGoal = 5, goalUpdatedAt = 0, legacyLongest = 0;
+    const mergeDays = (target, days) => {
+      if (!days || typeof days !== 'object' || Array.isArray(days)) return;
+      Object.entries(days).forEach(([day,count]) => {
+        if (validDay(day) && Number.isSafeInteger(count) && count > 0 && count <= 1000000000)
+          target[day] = Math.max(target[day] || 0, count);
+      });
+    };
+    values.forEach(value => {
+      if (!value || typeof value !== 'object') return;
+      const timestamp = Number.isFinite(value.goalUpdatedAt) ? value.goalUpdatedAt : 0;
+      if ([5,10,20].includes(value.dailyGoal) && timestamp >= goalUpdatedAt) { dailyGoal=value.dailyGoal; goalUpdatedAt=timestamp; }
+      if (value.version === 3) {
+        Object.entries(value.sources || {}).forEach(([id,days]) => {
+          if (/^[a-zA-Z0-9_-]{1,80}$/.test(id)) mergeDays(sources[id] ||= {}, days);
+        });
+        mergeDays(legacyDays, value.legacyDays);
+        (Array.isArray(value.inferredDays) ? value.inferredDays : []).filter(validDay).forEach(day=>inferred.add(day));
+        legacyLongest = Math.max(legacyLongest, Math.min(36600, Number(value.legacyLongest) || 0));
+      } else if (validDay(value.lastDay)) {
+        const streak = Math.min(3660, Math.max(1, Math.floor(Number(value.streak) || 0)));
+        for(let i=0;i<streak;i++) {
+          const day=shiftDay(value.lastDay,-i);
+          legacyDays[day]=Math.max(legacyDays[day] || 0, i ? 1 : Math.min(1000000000,Math.max(1,Math.floor(Number(value.dailyCount) || 0))));
+          if(i) inferred.add(day);
+        }
+        legacyLongest=Math.max(legacyLongest, Math.min(36600,Number(value.longest) || streak));
+      }
+    });
+    const history={...legacyDays};
+    Object.values(sources).forEach(days=>Object.entries(days).forEach(([day,count])=>{history[day]=(history[day] || 0)+count;}));
+    const days=Object.keys(history).sort();
+    let run=0, longest=legacyLongest;
+    days.forEach((day,index)=>{run=index && dayDistance(days[index-1],day)===1 ? run+1 : 1; longest=Math.max(longest,run);});
+    const lastDay=days.at(-1) || null;
+    return {version:3,sources,legacyDays,inferredDays:[...inferred].sort(),legacyLongest,dailyGoal,goalUpdatedAt,
+      history,lastDay,streak:run,longest,dailyCount:lastDay ? history[lastDay] : 0};
   }
 
   function currentDailyCount(activity, today) {
@@ -154,6 +205,17 @@
     if (!activity || !activity.lastDay) return 0;
     const distance = dayDistance(activity.lastDay, today || localDay());
     return distance === 0 || distance === 1 ? activity.streak || 0 : 0;
+  }
+
+  function calendarDays(month, today = localDay()) {
+    if(!/^\d{4}-\d{2}$/.test(month) || !validDay(month+'-01')) return [];
+    const first=month+'-01', weekday=(new Date(first+'T12:00:00Z').getUTCDay()+6)%7;
+    const next=new Date(first+'T12:00:00Z');next.setUTCMonth(next.getUTCMonth()+1);
+    const count=dayDistance(first,next.toISOString().slice(0,10));
+    return Array.from({length:Math.ceil((weekday+count)/7)*7},(_,index)=>{
+      const day=shiftDay(first,index-weekday);
+      return {day,inMonth:day.startsWith(month),today:day===today,future:day>today};
+    });
   }
 
   global.VocabSrs = {
@@ -169,6 +231,10 @@
     isStale,
     statusFor,
     localDay,
+    validDay,
+    shiftDay,
+    mergeActivity,
+    calendarDays,
     recordPractice,
     currentDailyCount,
     currentStreak

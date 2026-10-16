@@ -50,6 +50,7 @@
     sets: [],                 // [{id, name, createdAt, termCount, chunkCount}]
     languageGroups: [],       // aggregate scopes; words stay in their original sets
     activeSetId: null,
+    loadedScope: null,
     terms: [],                 // terms of the active set
     chunkMap: new Map(),       // termId -> {setId, chunkIdx}, for cheap partial saves
     termMeta: new Map(),       // termId -> {setId, setName, language}
@@ -70,13 +71,14 @@
   };
 
   let el = {}; // populated on DOMContentLoaded
-  let activityWriteQueue = Promise.resolve();
   let importBusy = false;
   let switchingSet = false;
   let saveQueue = Promise.resolve();
   let pendingWrites = [];
   let pendingBackupAvailable = true;
   let saveFailure = false;
+  let retryTimer = null, retryCount = 0;
+  let lastActivityRefresh = 0, activityRefreshing = false;
   let modalFocus = null;
   function journalKey(kind) {
     const user = window.Telegram?.WebApp?.initDataUnsafe?.user?.id || 'browser';
@@ -107,32 +109,81 @@
     if (message) {
       const text = document.createElement('span'); text.textContent = message; notice.append(text);
       const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn btn-ghost';
-      retry.textContent = 'Повторить сохранение'; retry.onclick = () => flushPendingWrites(); notice.append(retry);
+      retry.textContent = state.store?._uncertain ? 'Перезагрузить' : 'Повторить сохранение';
+      retry.onclick = () => { if(state.store?._uncertain) location.reload(); else {retryCount=0;flushPendingWrites();} }; notice.append(retry);
     }
   }
   function flushPendingWrites() {
     saveQueue = saveQueue.catch(() => {}).then(async () => {
       try {
-        while (pendingWrites.length) {
-          const job = pendingWrites[0];
-          if (!state.sets.some(set => set.id === job.setId)) { pendingWrites.shift(); writeJournal('pending', pendingWrites); continue; }
-          const result = await state.store.saveTerm(job.setId, job.term);
-          if (!result.ok) throw new Error('Не удалось сохранить слово');
-          await state.store.setActivity(job.activity);
-          pendingWrites.shift(); pendingBackupAvailable = writeJournal('pending', pendingWrites);
+        const savedActivity=readJournal('activity');
+        if(savedActivity) {
+          await state.store.setActivity(savedActivity);
+          if(JSON.stringify(readJournal('activity'))===JSON.stringify(savedActivity)) writeJournal('activity',null);
         }
-        saveFailure = false; updateSaveNotice('');
+        while (pendingWrites.length) {
+          const batch=pendingWrites.slice(), latest=new Map();
+          // Save the calendar even if a word/set was edited or deleted meanwhile.
+          await state.store.setActivity(Srs.mergeActivity(...batch.map(job=>job.activity)));
+          batch.forEach(job=>latest.set(job.setId+'\0'+job.term.id,job));
+          for(const job of latest.values()) {
+            if (!state.sets.some(set => set.id === job.setId)) continue;
+            const result = await state.store.saveTerm(job.setId, job.term);
+            if (!result.ok && !['missing_set','missing_term'].includes(result.reason)) throw new Error('Не удалось сохранить слово');
+          }
+          pendingWrites.splice(0,batch.length); pendingBackupAvailable = writeJournal('pending', pendingWrites);
+        }
+        saveFailure = false; retryCount=0; clearTimeout(retryTimer); updateSaveNotice(''); updateSyncBadge();
       } catch (error) {
         console.error('Progress write failed', error); saveFailure = true;
         updateSaveNotice(pendingBackupAvailable
-          ? (error.code === 'timeout' ? 'Telegram не подтвердил сохранение. Обнови страницу: резервная копия будет восстановлена.' : 'Прогресс пока не сохранён в основном хранилище. Резервная копия остаётся в этом браузере.')
+          ? (state.store?._uncertain ? 'Нужно переподключиться к Telegram. После перезагрузки восстановим ответы из резервной копии.' : 'Изменения пока на этом устройстве. Повторим синхронизацию при восстановлении связи.')
           : 'Не удалось сохранить прогресс и резервную копию. Не закрывай страницу.');
+        updateSyncBadge();
+        if(!state.store?._uncertain && retryCount<3 && navigator.onLine!==false) {
+          clearTimeout(retryTimer);retryTimer=setTimeout(()=>flushPendingWrites(),[5000,15000,45000][retryCount++]);
+        }
       }
     });
     return saveQueue;
   }
   const $ = (sel) => document.querySelector(sel);
   const SCREEN_TITLES = { home: 'Vocab', learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Vocab', loading: 'Vocab' };
+  let navigationVersion=0;
+
+  async function openScopedScreen(name,customQueue,forceNew) {
+    showScreen('loading');const token=++navigationVersion;
+    try {
+      await loadActiveSetTerms();
+      if(token!==navigationVersion) return;
+      renderSetSwitcher();showScreen(name,customQueue,forceNew);
+    } catch(error) {
+      if(token!==navigationVersion) return;
+      showScreen('home');showToast('Не удалось загрузить слова. Попробуй ещё раз — данные не удалены.',5000);
+    }
+  }
+
+  function updateSyncBadge() {
+    if(!el.syncBadge || !state.store) return;
+    el.syncBadge.className='sync-badge '+state.store.backendName;
+    el.syncBadge.textContent=state.store.backendName==='cloud'
+      ? saveFailure ? 'Telegram · есть несохранённые изменения' : pendingWrites.length || readJournal('activity') ? 'Telegram · сохраняем изменения…' : 'Telegram · все изменения сохранены'
+      : 'На этом устройстве · без синхронизации';
+  }
+
+  async function refreshActivity() {
+    if(activityRefreshing || !state.store || Date.now()-lastActivityRefresh<10000) return;
+    activityRefreshing=true;lastActivityRefresh=Date.now();
+    try {
+      const remote=await state.store.getActivity();
+      state.activity={...Srs.mergeActivity(remote,state.activity),sourceId:remote.sourceId};
+      renderDailyGoal();
+      if(state.screen==='review') renderStreak();
+      if(state.screen==='progress') renderProgress();
+      if(!el.calendarBackdrop.hidden) renderCalendar();
+    } catch(error) { console.warn('Activity refresh deferred',error); }
+    finally {activityRefreshing=false;}
+  }
 
   // ---------------------------------------------------------------------
   // Telegram WebApp integration
@@ -329,6 +380,10 @@
   // Screen navigation
   // ---------------------------------------------------------------------
   function showScreen(name, customQueue, forceNew = false) {
+    if(['learn','review','progress'].includes(name) && state.activeSetId && state.loadedScope!==state.activeSetId) {
+      openScopedScreen(name,customQueue,forceNew);return;
+    }
+    navigationVersion++;
     console.log('renderScreen:', name);
     state.screen = name;
     window.scrollTo(0, 0);
@@ -403,7 +458,7 @@
     if (switchingSet || !isValidScope(setId)) return false;
     switchingSet = true;
     const previous = state.activeSetId;
-    const previousData = {terms:state.terms,chunkMap:state.chunkMap,termMeta:state.termMeta};
+    const previousData = {terms:state.terms,chunkMap:state.chunkMap,termMeta:state.termMeta,loadedScope:state.loadedScope};
     try {
     state.activeSetId = setId;
     await loadActiveSetTerms();
@@ -437,7 +492,7 @@
       : state.sets.filter((set) => set.id === state.activeSetId);
     const bundles = await Promise.all(selectedSets.map(async (set) => ({
       set,
-      data: await state.store.loadSetTerms(set.id)
+      data: await state.store.loadSetTerms(set.id,set)
     })));
     const terms = [], chunkMap = new Map(), termMeta = new Map();
     bundles.forEach(({ set, data }) => {
@@ -453,6 +508,11 @@
       });
     });
     Object.assign(state, { terms, chunkMap, termMeta });
+    pendingWrites.forEach(job=>{
+      const term=terms.find(term=>term.id===job.term.id);
+      if(term && termMeta.get(term.id)?.setId===job.setId && (job.term.progress_updated_at || 0)>=(term.progress_updated_at || 0)) Object.assign(term,normalizeStoredTerm(job.term));
+    });
+    state.loadedScope=state.activeSetId;
   }
 
   async function refreshSetsList() {
@@ -464,7 +524,7 @@
         return [{ language, count: Number(set.termCount) || 0 }];
       }
       // Only legacy/mixed sets need reading; declared languages use metadata.
-      const { terms } = await state.store.loadSetTerms(set.id);
+      const { terms } = await state.store.loadSetTerms(set.id,set);
       set.language = language || inferSetLanguage(terms);
       const counts = new Map();
       terms.forEach(term => {
@@ -810,14 +870,17 @@
     el.dailyGoalTrack.setAttribute('aria-valuemax', String(goal));
     el.dailyGoalTrack.setAttribute('aria-valuenow', String(Math.min(count, goal)));
     el.dailyStreakText.textContent = `${streak} дн.`;
+    el.dailyStreak?.setAttribute('aria-label',`Серия: ${streak} дней. Открыть календарь`);
     el.dailyGoalSelect.value = String(goal);
     el.dailyGoalSelectLabel.textContent = el.dailyGoalSelect.selectedOptions[0]?.textContent || '';
+    renderWeek();
   }
 
   function saveActivity() {
     const snapshot = { ...state.activity };
-    activityWriteQueue = activityWriteQueue.catch(() => {}).then(() => state.store.setActivity(snapshot));
-    return activityWriteQueue;
+    writeJournal('activity',snapshot);
+    updateSyncBadge();
+    return flushPendingWrites();
   }
 
   function startLearnSession(customQueue, forceNew = false) {
@@ -991,12 +1054,14 @@
       term.last_review_failed = !isCorrect;
     }
     term.practice_points = Math.max(0, (Number(term.practice_points) || 0) + (isCorrect ? 1 : -1));
+    term.progress_updated_at=Date.now();
     state.activity = Srs.recordPractice(state.activity);
     renderDailyGoal();
     const location = state.chunkMap.get(termId);
     if (location) {
       pendingWrites.push({ setId: location.setId, term: JSON.parse(JSON.stringify(term)), activity: { ...state.activity } });
       pendingBackupAvailable = writeJournal('pending', pendingWrites);
+      updateSyncBadge();
     }
     saveSession({ ids: [termId], correct: isCorrect });
     await flushPendingWrites();
@@ -1898,7 +1963,52 @@
       : lastDigit === 1 ? 'день' : lastDigit >= 2 && lastDigit <= 4 ? 'дня' : 'дней';
     el.reviewStreak.innerHTML = `<span class="streak-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M13.5 2.5c.1 3-1.4 4.2-1.5 6.6-1.3-1-1.8-2.7-1.7-3.8-3.6 2.4-5.4 5.2-5.4 8.6a7.1 7.1 0 0 0 14.2 0c0-4.5-2.7-7.7-5.6-11.4Z"/></svg></span>
       <div><strong>${streak} ${dayWord} подряд</strong>
-      <span>${doneToday ? 'Сегодня уже занимались' : 'Ответь хотя бы на одно слово сегодня'}</span></div>`;
+      <span>${doneToday ? 'Сегодня уже занимались' : 'Ответь хотя бы на одно слово сегодня'}</span></div><span class="streak-calendar-label">Календарь</span>`;
+    el.reviewStreak.setAttribute('aria-label',`${streak} ${dayWord} подряд. Открыть календарь`);
+  }
+
+  let calendarMonth=null, calendarSelected=null, calendarFocus=null;
+  function renderWeek() {
+    if(!el.weekStrip) return;
+    const today=Srs.localDay(), weekday=(new Date(today+'T12:00:00Z').getUTCDay()+6)%7;
+    const labels=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+    el.weekStrip.innerHTML=labels.map((label,index)=>{
+      const day=Srs.shiftDay(today,index-weekday), active=!!state.activity.history?.[day];
+      return `<span class="week-day ${active ? 'practiced' : ''} ${day===today ? 'today' : ''}" ${day===today ? 'aria-current="date"' : ''}><span>${label}</span><strong>${Number(day.slice(8))}</strong><i aria-hidden="true"></i></span>`;
+    }).join('');
+  }
+  function openCalendar(event) {
+    calendarFocus=event?.currentTarget || document.activeElement;calendarMonth=Srs.localDay().slice(0,7);calendarSelected=Srs.localDay();
+    $('#app').inert=true;el.calendarBackdrop.hidden=false;renderCalendar();el.btnCloseCalendar.focus();
+  }
+  function closeCalendar() {
+    if(el.calendarBackdrop.hidden) return;
+    el.calendarBackdrop.hidden=true;$('#app').inert=false;calendarFocus?.focus();
+  }
+  function renderCalendar() {
+    const today=Srs.localDay(), history=state.activity.history || {};
+    el.calendarMonth.textContent=new Date(calendarMonth+'-01T12:00:00').toLocaleDateString('ru-RU',{month:'long',year:'numeric'}).replace(' г.','');
+    el.calendarCurrent.textContent=String(Srs.currentStreak(state.activity));
+    el.calendarBest.textContent=String(state.activity.longest || 0);
+    el.calendarTotal.textContent=String(Object.keys(history).length);
+    el.btnCalendarNext.disabled=calendarMonth>=today.slice(0,7);
+    el.btnCalendarPrev.disabled=calendarMonth<='1900-01';
+    const inferred=new Set(state.activity.inferredDays || []);
+    el.calendarGrid.innerHTML=Srs.calendarDays(calendarMonth,today).map(({day,inMonth,future})=>{
+      if(!inMonth) return '<span class="calendar-empty" aria-hidden="true"></span>';
+      const count=history[day] || 0, label=new Date(day+'T12:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long'});
+      return `<button type="button" class="calendar-day ${count ? 'practiced' : ''} ${day===today ? 'today' : ''} ${inferred.has(day) ? 'inferred' : ''}" data-calendar-day="${day}" aria-label="${escapeHtml(label)}: ${future ? 'ещё впереди' : inferred.has(day) ? 'восстановлено из старой серии' : `${count} ${answerWord(count)}`}" aria-pressed="${day===calendarSelected}" ${future ? 'disabled' : ''} ${day===today ? 'aria-current="date"' : ''}>${Number(day.slice(8))}<i aria-hidden="true"></i></button>`;
+    }).join('');
+    const selected=calendarSelected?.startsWith(calendarMonth) ? calendarSelected : null;
+    const monthDays=Object.keys(history).filter(day=>day.startsWith(calendarMonth)).length;
+    el.calendarDetail.textContent=selected
+      ? inferred.has(selected) ? 'Этот день восстановлен из прежней серии. Число ответов неизвестно.'
+        : `${new Date(selected+'T12:00:00').toLocaleDateString('ru-RU',{day:'numeric',month:'long'})} · ${history[selected] || 0} ${answerWord(history[selected] || 0)}`
+      : `Дней с занятиями в этом месяце: ${monthDays}`;
+  }
+  function moveCalendar(direction) {
+    const date=new Date(calendarMonth+'-01T12:00:00Z');date.setUTCMonth(date.getUTCMonth()+direction);
+    calendarMonth=date.toISOString().slice(0,7);calendarSelected=null;renderCalendar();
   }
 
   // ---------------------------------------------------------------------
@@ -1908,6 +2018,12 @@
   function cacheDom() {
     el = {
       mainHeader: $('#mainHeader'),
+      weekStrip:$('#weekStrip'),
+      dailyStreak:$('#dailyStreak'),
+      calendarBackdrop:$('#calendarBackdrop'),btnCloseCalendar:$('#btnCloseCalendar'),
+      calendarMonth:$('#calendarMonth'),calendarGrid:$('#calendarGrid'),calendarDetail:$('#calendarDetail'),
+      calendarCurrent:$('#calendarCurrent'),calendarBest:$('#calendarBest'),calendarTotal:$('#calendarTotal'),
+      btnCalendarPrev:$('#btnCalendarPrev'),btnCalendarNext:$('#btnCalendarNext'),
       btnBackHome: $('#btnBackHome'),
       topbarTitle: $('#topbarTitle'),
       setSwitch: $('#setSwitch'),
@@ -2019,6 +2135,17 @@
       btn.addEventListener('click', () => showScreen(btn.dataset.screen));
     });
     el.btnBackHome.addEventListener('click', () => showScreen('home'));
+    el.dailyStreak.addEventListener('click',openCalendar);
+    el.reviewStreak.addEventListener('click',openCalendar);
+    el.btnCloseCalendar.addEventListener('click',closeCalendar);
+    el.btnCalendarPrev.addEventListener('click',()=>moveCalendar(-1));
+    el.btnCalendarNext.addEventListener('click',()=>moveCalendar(1));
+    el.calendarGrid.addEventListener('click',event=>{const button=event.target.closest('[data-calendar-day]');if(button){calendarSelected=button.dataset.calendarDay;renderCalendar();el.calendarGrid.querySelector(`[data-calendar-day="${calendarSelected}"]`)?.focus();}});
+    el.calendarBackdrop.addEventListener('click',event=>{if(event.target===el.calendarBackdrop) closeCalendar();});
+    const resume=()=>{if(document.visibilityState==='hidden') return;refreshActivity();if(pendingWrites.length || readJournal('activity')){retryCount=0;flushPendingWrites();}};
+    document.addEventListener('visibilitychange',resume);
+    window.addEventListener('online',resume);
+    window.addEventListener('focus',resume);
     $('#btnRestartLearn').addEventListener('click', async () => {
       const reviewIds = state.session.reviewKinds ? [...state.session.reviewKinds.keys()] : undefined;
       if (await confirmDialog('Начать новое занятие вместо незавершённого? Сохранённый прогресс слов останется.', { title: 'Новое занятие?', action: 'Начать' })) startLearnSession(reviewIds, true);
@@ -2123,7 +2250,7 @@
     el.btnDeleteSet.addEventListener('click', () => deleteActiveSet());
     el.btnTheme.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
     el.dailyGoalSelect.addEventListener('change', async () => {
-      state.activity = { ...state.activity, dailyGoal: Number(el.dailyGoalSelect.value) };
+      state.activity = { ...state.activity, dailyGoal: Number(el.dailyGoalSelect.value),goalUpdatedAt:Date.now() };
       renderDailyGoal();
       try { await saveActivity(); }
       catch (error) { console.error('Could not save daily goal', error); showToast('Не удалось сохранить цель'); }
@@ -2183,7 +2310,7 @@
       }
     });
     document.addEventListener('keydown', (event) => {
-      const modal = [el.confirmBackdrop, el.surfaceBackdrop, el.flashcardBackdrop].find(node => !node.hidden);
+      const modal = [el.calendarBackdrop, el.confirmBackdrop, el.surfaceBackdrop, el.flashcardBackdrop].find(node => !node.hidden);
       if (modal && event.key === 'Tab') {
         const controls = [...modal.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')].filter(node => node.getClientRects().length);
         const first = controls[0], last = controls[controls.length - 1];
@@ -2200,6 +2327,7 @@
         }
       }
       if (event.key === 'Escape') {
+        if(!el.calendarBackdrop.hidden) {closeCalendar();return;}
         if (!el.confirmBackdrop.hidden) { closeConfirm(false); return; }
         closeSurface();
         el.setMenu.hidden = true;
@@ -2237,7 +2365,6 @@
     initTheme();
     initReviewSize();
     wireEvents();
-    initTelegram();
     registerOfflineApp();
 
     async function loadStorage() {
@@ -2245,21 +2372,32 @@
       $('#loadingError').hidden = true;
       $('#btnRetryLoad').disabled = true;
       try {
+      const launchedInTelegram=/(?:^|[&#?])tgWebAppData=/.test(location.hash+location.search);
+      if(launchedInTelegram && !window.Telegram?.WebApp?.initData) {
+        await new Promise(resolve=>{const deadline=Date.now()+3000;const check=()=>window.Telegram?.WebApp?.initData || Date.now()>=deadline ? resolve() : setTimeout(check,50);check();});
+      }
+      initTelegram();
       state.store = await window.VocabStorage.VocabStore.create();
       el.syncBadge.hidden = false;
       el.syncBadge.className = 'sync-badge ' + state.store.backendName;
       el.syncBadge.textContent = state.store.backendName === 'cloud'
-        ? 'Синхронизировано с Telegram'
-        : 'Локальный режим (без Telegram) — прогресс останется в этом браузере';
+        ? 'Telegram · загружаем данные…'
+        : 'На этом устройстве · без синхронизации';
 
-      [state.settings, state.activity] = await Promise.all([state.store.getSettings(), state.store.getActivity()]);
-      await refreshSetsList();
-      state.activeSetId = await state.store.getActiveSetId();
+      [state.settings, state.activity, state.activeSetId] = await Promise.all([state.store.getSettings(), state.store.getActivity(),state.store.getActiveSetId(),refreshSetsList()]);
+      lastActivityRefresh=Date.now();
+      const savedActivity=readJournal('activity');
+      if(savedActivity) state.activity={...Srs.mergeActivity(state.activity,savedActivity),sourceId:state.activity.sourceId};
       const pending = readJournal('pending');
       pendingWrites = Array.isArray(pending) ? pending.filter(job => job && typeof job.setId === 'string' && job.term?.id && job.activity && typeof job.activity === 'object') : [];
-      await flushPendingWrites();
+      pendingWrites.forEach(job => {
+        state.activity = {...Srs.mergeActivity(state.activity,job.activity),sourceId:state.activity.sourceId};
+      });
+      // Also publish recovered legacy history, even before the first new answer.
+      writeJournal('activity',state.activity);
       if (state.sets.length === 0) {
       openImportScreen('first');
+      updateSyncBadge();flushPendingWrites();
       return;
       }
 
@@ -2271,15 +2409,11 @@
       catch (e) { console.error('Failed to persist active set id:', e); }
     }
 
-      await loadActiveSetTerms();
-      pendingWrites.forEach(job => {
-        const term = getTermById(job.term.id);
-        if (term && state.termMeta.get(term.id)?.setId === job.setId) Object.assign(term, normalizeStoredTerm(job.term));
-        state.activity = job.activity;
-      });
-      if (!pendingWrites.length) state.activity = await state.store.getActivity();
     renderSetSwitcher();
     showScreen('home');
+    updateSyncBadge();
+    // The home screen must not wait for potentially slow/offline writes.
+    flushPendingWrites();
       } catch (error) {
         console.error('Storage load failed', error);
         $('#loadingError').hidden = false;

@@ -1,14 +1,14 @@
-const CACHE_NAME = 'vocab-app-v18';
+const CACHE_NAME = 'vocab-app-v19';
 const APP_FILES = [
   './',
   './index.html',
-  './style.css?v=18',
+  './style.css?v=19',
   './InterVariable.woff2',
-  './storage.js?v=18',
-  './csv.js?v=18',
-  './srs.js?v=18',
-  './exercises.js?v=18',
-  './app.js?v=18',
+  './storage.js?v=19',
+  './csv.js?v=19',
+  './srs.js?v=19',
+  './exercises.js?v=19',
+  './app.js?v=19',
   './manifest.webmanifest',
   './apple-touch-icon.png',
   './icon-192.png',
@@ -36,17 +36,19 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin || !url.pathname.startsWith(new URL(self.registration.scope).pathname)) return;
 
-  event.respondWith(
-    fetch(request).then((response) => {
-      if (response.ok) {
-        const copy = response.clone();
-        event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)));
-      }
+  event.respondWith((async()=>{
+    const cache=await caches.open(CACHE_NAME);
+    const cached=await cache.match(request) || (request.mode==='navigate' ? await cache.match('./index.html') : null);
+    // Versioned assets are immutable within this cache; don't wait on mobile networks.
+    if(cached && request.mode!=='navigate') return cached;
+    const network=fetch(request).then(async response=>{
+      if(response.ok) await cache.put(request,response.clone());
       return response;
-    }).catch(async () => {
-      const cache = await caches.open(CACHE_NAME);
-      return await cache.match(request) ||
-        (request.mode === 'navigate' ? await cache.match('./index.html') : Response.error());
-    })
-  );
+    }).catch(()=>cached || Response.error());
+    event.waitUntil(network.then(()=>{}));
+    if(!cached) return network;
+    let timer;
+    const response=await Promise.race([network,new Promise(resolve=>{timer=setTimeout(()=>resolve(cached),1800);})]);
+    clearTimeout(timer);return response;
+  })());
 });
