@@ -13,11 +13,14 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%234255ff'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-family='Arial' font-size='34' font-weight='700' fill='white'%3EV%3C/text%3E%3C/svg%3E">
 <script async src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preload" href="InterVariable.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="style.css?v=20">
+<link rel="stylesheet" href="style.css?v=22">
+<link rel="stylesheet" href="interface.css?v=22">
 </head>
 <body>
 
 <div id="app">
+  <a class="skip-link" href="#screen-home" id="skipContent">Перейти к содержимому</a>
+  <div class="sr-only" id="answerStatus" role="status"></div>
 
   <!-- ===================== LOADING SCREEN ===================== -->
   <section class="screen screen-loading" id="screen-loading">
@@ -112,12 +115,13 @@
   <!-- ===================== HOME SCREEN ===================== -->
   <section class="screen screen-home" id="screen-home" hidden>
     <div class="daily-card" id="dailyGoalCard">
-      <div class="daily-card-top"><span class="daily-kicker">ТВОЙ РИТМ</span><button class="daily-streak" id="dailyStreak" type="button" aria-label="Открыть календарь серии"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 2.5c.1 3-1.4 4.2-1.5 6.6-1.3-1-1.8-2.7-1.7-3.8-3.6 2.4-5.4 5.2-5.4 8.6a7.1 7.1 0 0 0 14.2 0c0-4.5-2.7-7.7-5.6-11.4Z"/></svg><span id="dailyStreakText">0 дней</span></button></div>
-      <div class="daily-card-main"><div><h1>Немного практики.<br>Каждый день.</h1><p id="dailyGoalMessage">Осталось дать 5 ответов</p></div><strong id="dailyGoalCount">0 / 5</strong></div>
+      <div class="daily-card-top"><span class="daily-kicker" id="todayDate">Сегодня</span><button class="daily-streak" id="dailyStreak" type="button" aria-label="Открыть календарь серии"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 2.5c.1 3-1.4 4.2-1.5 6.6-1.3-1-1.8-2.7-1.7-3.8-3.6 2.4-5.4 5.2-5.4 8.6a7.1 7.1 0 0 0 14.2 0c0-4.5-2.7-7.7-5.6-11.4Z"/></svg><span id="dailyStreakText">0 дней</span></button></div>
+      <div class="daily-card-main"><div><h1>План на сегодня</h1><p id="dailyGoalMessage">Осталось дать 5 ответов</p></div><strong id="dailyGoalCount">0 / 5</strong></div>
       <div class="daily-track" id="dailyGoalTrack" role="progressbar" aria-label="Ежедневная цель" aria-valuemin="0" aria-valuemax="5" aria-valuenow="0"><span id="dailyGoalFill"></span></div>
+      <div class="home-start"><button class="btn btn-primary" id="btnHomeContinue" type="button">Начать занятие</button><p id="homeScopeLabel"></p></div>
       <div class="week-strip" id="weekStrip" role="group" aria-label="Занятия на этой неделе"></div>
     </div>
-    <div class="home-set-heading"><div><span class="eyebrow">СЛОВАРЬ</span><h2>Твои наборы</h2></div><button class="btn btn-ghost" id="btnHomeAddSet" type="button">＋ Новый</button></div>
+    <div class="home-set-heading"><h2>Наборы</h2><button class="btn btn-ghost" id="btnHomeAddSet" type="button">Добавить набор</button></div>
     <div class="home-set-list" id="homeSetList"></div>
   </section>
 
@@ -141,8 +145,10 @@
 
   <!-- ===================== REVIEW SCREEN ===================== -->
   <section class="screen" id="screen-review" hidden>
+    <h1 class="screen-title">Повторение</h1>
     <button class="streak-card" id="reviewStreak" type="button" aria-label="Открыть календарь серии"></button>
     <div class="review-actions"><button class="btn btn-primary btn-quick-review" id="btnQuickReview">Повторить сейчас</button><button class="btn btn-ghost" id="btnBrowseCards">Карточки</button></div>
+    <div class="review-plan"><p id="reviewPlanNote"></p><button class="btn btn-ghost" id="btnExtraPractice" type="button" aria-pressed="false">Тренироваться раньше срока</button></div>
     <div class="review-size-control" id="reviewSizeControl">
       <div class="review-size-head">
         <label for="reviewSize">Сколько слов повторить</label>
@@ -155,7 +161,7 @@
 
     <div class="tabs" id="reviewTabs">
       <span class="tab-indicator" id="reviewTabIndicator" aria-hidden="true"></span>
-      <button class="tab active" data-filter="due">По расписанию</button>
+      <button class="tab active" data-filter="due">К повторению</button>
       <button class="tab" data-filter="difficult">Сложные</button>
       <button class="tab" data-filter="learned">Изученные</button>
       <button class="tab" data-filter="stale">Давно не видел</button>
@@ -167,22 +173,24 @@
 
   <!-- ===================== PROGRESS SCREEN ===================== -->
   <section class="screen" id="screen-progress" hidden>
-    <div class="goal-settings">
-      <div><strong>Ежедневная цель</strong><span>Сколько ответов хочешь дать за день</span></div>
-      <div class="goal-select-wrap">
-        <span class="goal-select-label" id="dailyGoalSelectLabel" aria-hidden="true">5 ответов</span>
-        <select id="dailyGoalSelect" aria-label="Ежедневная цель"><option value="5">5 ответов</option><option value="10">10 ответов</option><option value="20">20 ответов</option></select>
-      </div>
-    </div>
-    <div class="stat-grid" id="progressStats"></div>
-
+    <h1 class="screen-title">Прогресс слов</h1>
     <div class="progress-bar-wrap">
+      <div class="progress-bar-label" id="progressBarLabel"></div>
       <div class="progress-bar-track">
         <div class="progress-bar-fill" id="progressBarFill"></div>
       </div>
-      <div class="progress-bar-label" id="progressBarLabel"></div>
+      <p class="progress-explanation">Каждый правильный ответ — +1. Пять верных ответов — слово изучено. Ошибки не обнуляют счётчик.</p>
     </div>
-
+    <div class="stat-grid" id="progressStats"></div>
+    <details class="goal-preferences"><summary>Настроить ежедневную цель</summary>
+      <div class="goal-settings">
+        <div><strong>Ежедневная цель</strong><span>Сколько ответов хочешь дать за день</span></div>
+        <div class="goal-select-wrap">
+          <span class="goal-select-label" id="dailyGoalSelectLabel" aria-hidden="true">5 ответов</span>
+          <select id="dailyGoalSelect" aria-label="Ежедневная цель"><option value="5">5 ответов</option><option value="10">10 ответов</option><option value="20">20 ответов</option></select>
+        </div>
+      </div>
+    </details>
     <div class="word-table" id="wordTable"></div>
   </section>
 
@@ -286,7 +294,7 @@
 
 <div class="calendar-backdrop" id="calendarBackdrop" hidden>
   <section class="calendar-surface" role="dialog" aria-modal="true" aria-labelledby="calendarTitle">
-    <header class="calendar-header"><div><span class="eyebrow">ШАГ ЗА ШАГОМ</span><h2 id="calendarTitle">Твоя серия</h2></div><button class="icon-btn" id="btnCloseCalendar" type="button" aria-label="Закрыть календарь">×</button></header>
+    <header class="calendar-header"><h2 id="calendarTitle">Твоя серия</h2><button class="icon-btn" id="btnCloseCalendar" type="button" aria-label="Закрыть календарь">×</button></header>
     <div class="calendar-summary"><div><strong id="calendarCurrent">0</strong><span>дней подряд</span></div><div><strong id="calendarBest">0</strong><span>лучшая серия</span></div><div><strong id="calendarTotal">0</strong><span>дней с практикой</span></div></div>
     <div class="calendar-month-nav"><button class="icon-btn" id="btnCalendarPrev" type="button" aria-label="Предыдущий месяц">‹</button><h3 id="calendarMonth" aria-live="polite"></h3><button class="icon-btn" id="btnCalendarNext" type="button" aria-label="Следующий месяц">›</button></div>
     <div class="calendar-weekdays" aria-hidden="true"><span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span></div>
@@ -296,10 +304,10 @@
   </section>
 </div>
 
-<script src="srs.js?v=20"></script>
-<script src="storage.js?v=20"></script>
-<script src="csv.js?v=20"></script>
-<script src="exercises.js?v=20"></script>
-<script src="app.js?v=20"></script>
+<script src="srs.js?v=22"></script>
+<script src="storage.js?v=22"></script>
+<script src="csv.js?v=22"></script>
+<script src="exercises.js?v=22"></script>
+<script src="app.js?v=22"></script>
 </body>
 </html>

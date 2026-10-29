@@ -1,23 +1,16 @@
 /**
  * srs.js
  * -----------------------------------------------------------------------
- * Spaced repetition scheduler.
+ * Answer-based progress and occasional review selection.
  *
  * Each term carries: attempts, correct_count, mastery_level, due_date,
  * last_seen, status.
  *
- *   mastery_level: 0..intervals.length. Advances by exactly one on every
- *   correct answer and is what drives the schedule (not correct_count,
- *   which is kept only for stats). A term becomes "learned" once
- *   mastery_level reaches intervals.length (5 by default) — i.e. after
- *   5 successful *spaced* reviews, because after each correct answer the
- *   due_date is pushed into the future by the matching interval, so the
- *   same item can't be re-answered and re-credited repeatedly inside one
- *   sitting.
- *
- *   On an incorrect answer, mastery_level drops by one (min 0) and the
- *   item is made due again soon (default: 10 minutes), so it resurfaces
- *   for extra practice without resetting all prior progress.
+ *   Every correct completed check adds one point immediately, including
+ *   multiple answers in the same lesson. Five points means "learned".
+ *   Errors flag a word for practice without subtracting earned answers.
+ *   Unfinished words remain available; learned words return occasionally
+ *   after a cooldown, with a small reserved share in mixed lessons.
  * -----------------------------------------------------------------------
  */
 (function (global) {
@@ -35,7 +28,9 @@
       attempts: 0,
       correct_count: 0,
       practice_points: 0,
-      srs_version: 2,
+      srs_version: 4,
+      last_mastery_at: null,
+      last_lapse_at: null,
       mastery_level: 0,
       due_date: now,       // immediately eligible for learning
       last_seen: null,
@@ -45,8 +40,8 @@
   }
 
   function statusFor(term, intervals) {
-    if (term.attempts === 0) return 'new';
     if (term.mastery_level >= intervals.length) return 'learned';
+    if (term.attempts === 0 && !term.mastery_level && !term.last_review_failed) return 'new';
     return 'learning';
   }
 
@@ -56,47 +51,41 @@
    * @param {boolean} isCorrect
    * @param {number[]} intervals - days per mastery step
    */
-  function applyAnswer(term, isCorrect, intervals) {
+  function applyAnswer(term, isCorrect, intervals, now = Date.now()) {
     intervals = intervals || DEFAULT_INTERVALS_DAYS;
-    const now = Date.now();
-    const wasDue = term.attempts === 0 || isDue(term, now);
-    term.mastery_level = effectiveMastery(term, intervals, now);
-    term.attempts += 1;
+    term.mastery_level = effectiveMastery(term, intervals);
+    term.attempts = (Number(term.attempts) || 0) + 1;
     term.last_seen = now;
 
     if (isCorrect) {
-      term.correct_count += 1;
-      if (wasDue) {
-        term.mastery_level = Math.min(term.mastery_level + 1, intervals.length);
-        const stepDays = intervals[Math.min(term.mastery_level, intervals.length) - 1];
-        term.due_date = now + stepDays * 24 * 60 * 60 * 1000;
-      }
+      term.correct_count = (Number(term.correct_count) || 0) + 1;
+      term.mastery_level = Math.min(Math.max(term.mastery_level + 1,term.correct_count), intervals.length);
+      term.last_mastery_at = now;
+      term.due_date = term.mastery_level>=intervals.length ? now+7*86400000 : now;
     } else {
-      term.mastery_level = Math.max(term.mastery_level - 1, 0);
+      term.last_lapse_at = now;
       term.due_date = now + RELEARN_MINUTES * 60 * 1000;
     }
-
+    term.last_review_failed=!isCorrect;
+    term.srs_version=4;
     term.status = statusFor(term, intervals);
     return term;
   }
 
   function isDue(term, now) {
-    now = now || Date.now();
+    now = now ?? Date.now();
     return term.due_date <= now;
   }
 
   function effectiveMastery(term, intervals, now) {
     intervals = intervals || DEFAULT_INTERVALS_DAYS;
     now = now ?? Date.now();
-    const level = Math.max(0, Math.min(term.mastery_level || 0, intervals.length));
-    if (!level || !term.last_seen || now < term.due_date) return level;
-    const period = Math.max(1, intervals[level - 1]) * 86400000;
-    const decay = Math.floor((now - term.due_date) / period) + (term.status === 'learned' ? 1 : 0);
-    return Math.max(0, level - decay);
+    // Due is a reminder, not evidence that a correct answer has been forgotten.
+    return Math.max(0, Math.min(Number(term.mastery_level) || 0, intervals.length));
   }
 
   function needsReminder(term, intervals, now) {
-    return term.status !== 'learned' || effectiveMastery(term, intervals, now) < (intervals || DEFAULT_INTERVALS_DAYS).length;
+    return term.status === 'new' || isDue(term, now);
   }
 
   function masteryPercent(terms, intervals, now) {
@@ -112,6 +101,26 @@
     return (term.last_review_failed ? 100 : 0) +
       (term.status !== 'new' && isDue(term, now) ? 30 : 0) +
       Math.min(overdueDays, 30) - (Number(term.mastery_level) || 0);
+  }
+
+  function reviewPool(terms, extra = false, now = Date.now()) {
+    return terms.filter(term=>extra || term.status!=='learned' || isDue(term,now) || !term.last_seen || now-Number(term.last_seen)>=86400000);
+  }
+
+  function selectSessionTerms(terms, count, now = Date.now()) {
+    count=Math.max(0,Math.floor(Number(count) || 0));
+    const sorted=[...terms].sort((a,b)=>reviewPriority(b,now)-reviewPriority(a,now));
+    const learned=sorted.filter(term=>term.status==='learned' && !term.last_review_failed);
+    const active=sorted.filter(term=>term.status!=='learned' || term.last_review_failed);
+    const activeCount=Math.min(active.length,count-Math.min(learned.length,Math.floor(count/5)));
+    const fresh=active.filter(term=>term.status==='new');
+    const practicing=active.filter(term=>term.status!=='new');
+    const freshSlots=Math.min(fresh.length,practicing.length && activeCount>1 ? Math.max(1,Math.floor(activeCount/5)) : practicing.length ? 0 : activeCount);
+    const selected=[...practicing.slice(0,activeCount-freshSlots),...fresh.slice(0,freshSlots)];
+    const ids=new Set(selected.map(term=>term.id));
+    for(const term of active) {if(selected.length>=activeCount) break;if(!ids.has(term.id)){selected.push(term);ids.add(term.id);}}
+    for(const term of learned) {if(selected.length>=count) break;if(!ids.has(term.id)){selected.push(term);ids.add(term.id);}}
+    return selected;
   }
 
   function isStale(term, days, now) {
@@ -227,6 +236,8 @@
     effectiveMastery,
     masteryPercent,
     reviewPriority,
+    reviewPool,
+    selectSessionTerms,
     needsReminder,
     isStale,
     statusFor,

@@ -298,7 +298,7 @@
     async addTerm(id, term) { return this._editTerms(id, term, false); }
     async updateTerm(id, term) { return this._editTerms(id, term, true); }
     _progressFields(term) {
-      const fields=['attempts','correct_count','practice_points','srs_version','mastery_level','due_date','last_seen','status','last_review_failed','translationAliases','progress_updated_at'];
+      const fields=['attempts','correct_count','practice_points','srs_version','mastery_level','last_mastery_at','last_lapse_at','due_date','last_seen','status','last_review_failed','translationAliases','progress_updated_at'];
       return Object.fromEntries(fields.filter(key=>Object.hasOwn(term,key)).map(key=>[key,term[key]]));
     }
     async saveTerm(id, term) {

@@ -65,6 +65,7 @@
       pendingStudyTermId: null // set while Phase 1 (study) is showing, before Phase 2 test
     },
     reviewFilter: 'due',
+    extraPractice: false,
     reviewSize: 5,
     flashcards: { items: [], index: 0, revealed: false },
     editingTermId: null
@@ -91,9 +92,15 @@
   function readJournal(kind) {
     try { return JSON.parse(localStorage.getItem(journalKey(kind)) || 'null'); } catch { return null; }
   }
+  function hasSessionTasks(saved,scope=state.activeSetId) {
+    if(saved?.version!==1 || saved.progressModel!==4 || saved.setId!==scope || !Array.isArray(saved.queue) || Date.now()-saved.updatedAt>=7*86400000) return false;
+    const queue=saved.queue.slice();
+    (Array.isArray(saved.pendingNext?.ids) ? saved.pendingNext.ids : []).forEach(id=>{const index=queue.indexOf(id);if(index>=0)queue.splice(index,1);});
+    return queue.length>0;
+  }
   function saveSession(pendingNext = null) {
     if (!state.session.queue.length) { writeJournal('session', null); return; }
-    writeJournal('session', { version: 1, setId: state.activeSetId, updatedAt: Date.now(),
+    writeJournal('session', { version: 1, progressModel:4, setId: state.activeSetId, updatedAt: Date.now(),
       queue: state.session.queue, initialLength: state.session.initialLength,
       reviewKinds: state.session.reviewKinds ? [...state.session.reviewKinds] : null,
       reviewResults: [...(state.session.reviewResults || [])], studied: [...(state.session.studied || [])], pendingNext });
@@ -151,12 +158,12 @@
   const SCREEN_TITLES = { home: 'Vocab', learn: 'Учить', review: 'Повторение', progress: 'Прогресс', import: 'Vocab', loading: 'Vocab' };
   let navigationVersion=0;
 
-  async function openScopedScreen(name,customQueue,forceNew) {
+  async function openScopedScreen(name,customQueue,forceNew,taskBudget=20) {
     showScreen('loading');const token=++navigationVersion;
     try {
       await loadActiveSetTerms();
       if(token!==navigationVersion) return;
-      renderSetSwitcher();showScreen(name,customQueue,forceNew);
+      renderSetSwitcher();showScreen(name,customQueue,forceNew,taskBudget);
     } catch(error) {
       if(token!==navigationVersion) return;
       showScreen('home');showToast('Не удалось загрузить слова. Попробуй ещё раз — данные не удалены.',5000);
@@ -263,7 +270,10 @@
 
   function applyTheme(theme) {
     const chosen = theme === 'dark' ? 'dark' : 'light';
+    const guard=document.createElement('style');guard.textContent='*,*::before,*::after{transition:none!important}';document.head.append(guard);
     document.documentElement.dataset.theme = chosen;
+    void document.body.offsetHeight;
+    requestAnimationFrame(()=>requestAnimationFrame(()=>guard.remove()));
     const themeMeta = document.querySelector('meta[name="theme-color"]');
     if (themeMeta) themeMeta.setAttribute('content', chosen === 'dark' ? '#0f151e' : '#f4f6f8');
     if (el.btnTheme) {
@@ -366,10 +376,17 @@
     term.translationAliases = Array.isArray(term.translationAliases) ? term.translationAliases.filter(value => typeof value === 'string' && value.trim()).slice(0, 30) : [];
     const storedLevel = Number.isFinite(Number(term.mastery_level)) ? Math.max(0, Math.floor(Number(term.mastery_level))) : 0;
     // Map the old ten-step scale proportionally once, without discarding progress.
-    term.mastery_level = term.srs_version === 2
+    term.mastery_level = Number(term.srs_version) >= 2
       ? Math.min(state.settings.intervalsDays.length, storedLevel)
       : Math.min(state.settings.intervalsDays.length, Math.round(storedLevel * state.settings.intervalsDays.length / 10));
-    term.srs_version = 2;
+    if(!(Number(term.srs_version)>=4)) {
+      // Recover all recorded correct answers, including those previously held
+      // behind daily gates. Preserve earned legacy progress when history is partial.
+      term.correct_count=Math.max(term.correct_count,term.practice_points,term.mastery_level);
+      term.attempts=Math.max(term.attempts,term.correct_count);
+      term.mastery_level=Math.min(state.settings.intervalsDays.length,term.correct_count);
+    }
+    term.srs_version = 4;
     term.due_date = Number.isFinite(Number(term.due_date)) ? Number(term.due_date) : Date.now();
     term.created_at = Number.isFinite(Number(term.created_at)) ? Number(term.created_at) : Date.now();
     term.status = term.attempts === 0 && term.last_review_failed ? 'learning' : Srs.statusFor(term, state.settings.intervalsDays);
@@ -379,13 +396,14 @@
   // ---------------------------------------------------------------------
   // Screen navigation
   // ---------------------------------------------------------------------
-  function showScreen(name, customQueue, forceNew = false) {
+  function showScreen(name, customQueue, forceNew = false,taskBudget=20) {
     if(['learn','review','progress'].includes(name) && state.activeSetId && state.loadedScope!==state.activeSetId) {
-      openScopedScreen(name,customQueue,forceNew);return;
+      openScopedScreen(name,customQueue,forceNew,taskBudget);return;
     }
     navigationVersion++;
     console.log('renderScreen:', name);
     state.screen = name;
+    document.title=`${SCREEN_TITLES[name]} — Vocab`;
     window.scrollTo(0, 0);
     if (el.setMenu) {
       el.setMenu.hidden = true;
@@ -397,7 +415,9 @@
     // loading screen can never stay on top of another screen.
     Object.keys(el.screens).forEach((key) => {
       el.screens[key].hidden = key !== name;
+      if(key===name) el.screens[key].setAttribute('role','main');else el.screens[key].removeAttribute('role');
     });
+    if(name!=='loading') {el.screens[name].classList.toggle('enter-once',!el.screens[name].dataset.visited);el.screens[name].dataset.visited='true';}
     // Belt-and-braces in case a new screen is ever added to the DOM but
     // forgotten in el.screens: loading is never allowed to stay visible
     // once we've decided to render anything else.
@@ -423,9 +443,14 @@
     });
 
     if (name === 'home') renderHome();
-    if (name === 'learn') startLearnSession(customQueue, forceNew);
+    if (name === 'learn') startLearnSession(customQueue, forceNew,taskBudget);
     if (name === 'review') renderReview();
     if (name === 'progress') renderProgress();
+    if(el.skipContent) el.skipContent.href='#screen-'+name;
+    if(name!=='loading') {
+      const focus=el.screens[name].querySelector('h1') || el.screens[name];focus.tabIndex=-1;focus.focus({preventScroll:true});
+      requestAnimationFrame(()=>{if(state.screen===name) window.scrollTo(0,0);});
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -477,23 +502,25 @@
   }
 
   async function loadActiveSetTerms() {
+    const scopeId=state.activeSetId;
     if (!state.activeSetId) {
       state.terms = [];
       state.chunkMap = new Map();
       state.termMeta = new Map();
       return;
     }
-    const selectedLanguage = scopeLanguage();
+    const selectedLanguage = scopeLanguage(scopeId);
     const selectedSets = selectedLanguage !== null
       ? state.sets.filter(set => {
         const language = Ex.canonicalLanguage(set.language);
         return !language || language === 'mixed' || language === selectedLanguage;
       })
-      : state.sets.filter((set) => set.id === state.activeSetId);
+      : state.sets.filter((set) => set.id === scopeId);
     const bundles = await Promise.all(selectedSets.map(async (set) => ({
       set,
       data: await state.store.loadSetTerms(set.id,set)
     })));
+    if(state.activeSetId!==scopeId) return false;
     const terms = [], chunkMap = new Map(), termMeta = new Map();
     bundles.forEach(({ set, data }) => {
       const setLanguage = Ex.canonicalLanguage(set.language || inferSetLanguage(data.terms));
@@ -512,7 +539,7 @@
       const term=terms.find(term=>term.id===job.term.id);
       if(term && termMeta.get(term.id)?.setId===job.setId && (job.term.progress_updated_at || 0)>=(term.progress_updated_at || 0)) Object.assign(term,normalizeStoredTerm(job.term));
     });
-    state.loadedScope=state.activeSetId;
+    state.loadedScope=scopeId;
   }
 
   async function refreshSetsList() {
@@ -548,7 +575,13 @@
   function renderHome() {
     renderDailyGoal();
     const saved = readJournal('session');
-    const sessionLabel = id => saved?.setId === id && saved.queue?.length ? 'Продолжить занятие' : 'Начать занятие';
+    const sessionLabel = id => hasSessionTasks(saved,id) ? 'Продолжить занятие' : 'Начать занятие';
+    const canResume=hasSessionTasks(saved);
+    const resting=state.loadedScope===state.activeSetId && !Srs.reviewPool(state.terms).length;
+    el.btnHomeContinue.textContent=canResume ? 'Продолжить занятие' : resting
+      ? Srs.currentDailyCount(state.activity)<dailyGoal() ? 'Продолжить практику' : 'Открыть повторение'
+      : 'Начать занятие';
+    el.homeScopeLabel.textContent=scopeLanguage() ? `Все наборы · ${languageLabel(scopeLanguage())}` : state.sets.find(set=>set.id===state.activeSetId)?.name || '';
     const sortedSets = [...state.sets].sort((a, b) => setCreationTime(b) - setCreationTime(a));
     const allSets = state.languageGroups.map(group => `
       <div class="home-set-card home-language-card">
@@ -558,7 +591,7 @@
         </button>
       </div>
     `).join('');
-    el.homeSetList.innerHTML = (allSets ? `<section class="home-language-section" aria-label="Занятия по языкам"><h3>По языкам</h3><p>Все наборы одного языка — вместе.</p><div class="home-language-panel">${allSets}</div></section>` : '') + sortedSets.map((set) => `
+    el.homeSetList.innerHTML = (allSets ? `<section class="home-language-section" aria-label="Занятия по языкам"><h3>Занятия по языкам</h3><div class="home-language-panel">${allSets}</div></section>` : '') + sortedSets.map((set) => `
       <div class="home-set-card">
         <button class="home-set-open" type="button" data-open-set="${escapeHtml(set.id)}">
           <span class="home-set-language">${escapeHtml(languageLabel(set.language))}</span>
@@ -569,6 +602,26 @@
         <button class="home-set-delete" type="button" data-delete-set="${escapeHtml(set.id)}" aria-label="Удалить набор ${escapeHtml(set.name)}">Удалить</button>
       </div>
     `).join('');
+  }
+
+  async function openHomeSession() {
+    const button=el.btnHomeContinue, previous=button.textContent, scope=state.activeSetId;
+    const token=++navigationVersion;button.disabled=true;button.textContent='Загружаем слова…';
+    try {
+      if(state.loadedScope!==scope) await loadActiveSetTerms();
+      if(token!==navigationVersion || state.activeSetId!==scope) return;
+      renderSetSwitcher();
+      const saved=readJournal('session'),resume=hasSessionTasks(saved,scope);
+      if(!resume && !Srs.reviewPool(state.terms).length) {
+        const remaining=Math.max(0,dailyGoal()-Srs.currentDailyCount(state.activity));
+        if(remaining && state.terms.length) {
+          const count=Math.min(remaining,state.terms.length,5);
+          const ids=chooseReviewTerms(state.terms,count).map(term=>term.id);
+          showScreen('learn',ids,true,count);
+        } else {state.extraPractice=false;showScreen('review');}
+      } else showScreen('learn',undefined,!resume);
+    } catch(error) {showToast('Не удалось открыть занятие. Проверь соединение и попробуй ещё раз.',5000);}
+    finally {button.disabled=false;button.textContent=previous;}
   }
 
   function updateOtherLanguage(select, input) {
@@ -806,7 +859,7 @@
   function computeStats(terms) {
     const now = Date.now();
     const total = terms.length;
-    const learned = terms.filter((t) => t.status === 'learned' && !Srs.needsReminder(t, state.settings.intervalsDays, now)).length;
+    const learned = terms.filter((t) => t.status === 'learned').length;
     const brandNew = terms.filter((t) => t.status === 'new').length;
     const learning = total - learned - brandNew;
     const dueToday = terms.filter((t) => t.status !== 'new' && Srs.isDue(t, now)).length;
@@ -825,13 +878,7 @@
   // ---------------------------------------------------------------------
   function buildLearnQueue(terms) {
     const now = Date.now();
-    const due = terms.filter((t) => t.status !== 'new' && Srs.isDue(t, now))
-      .sort((a, b) => a.due_date - b.due_date);
-    const fresh = terms.filter((t) => t.status === 'new')
-      .sort((a, b) => a.created_at - b.created_at);
-    // Due reviews first, but always include fresh words too so a brand-new
-    // set (all "new", nothing "due" yet) is never shown as empty.
-    return [...due, ...fresh].slice(0, SESSION_SIZE).map((t) => t.id);
+    return Srs.selectSessionTerms(Srs.reviewPool(Ex.shuffle(terms),false,now),SESSION_SIZE,now).map(term=>term.id);
   }
 
   function getTermById(id) { return state.terms.find((t) => t.id === id); }
@@ -873,6 +920,7 @@
     el.dailyStreak?.setAttribute('aria-label',`Серия: ${streak} дней. Открыть календарь`);
     el.dailyGoalSelect.value = String(goal);
     el.dailyGoalSelectLabel.textContent = el.dailyGoalSelect.selectedOptions[0]?.textContent || '';
+    if(el.todayDate) el.todayDate.textContent=new Date().toLocaleDateString('ru-RU',{day:'numeric',month:'long'});
     renderWeek();
   }
 
@@ -883,9 +931,10 @@
     return flushPendingWrites();
   }
 
-  function startLearnSession(customQueue, forceNew = false) {
+  function startLearnSession(customQueue, forceNew = false,taskBudget=20) {
+    state.session.scoredPendingIds=new Set();
     const saved = forceNew ? null : readJournal('session');
-    if (saved?.version === 1 && saved.setId === state.activeSetId && Date.now() - saved.updatedAt < 7 * 86400000 &&
+    if (saved?.version === 1 && saved.progressModel === 4 && saved.setId === state.activeSetId && Date.now() - saved.updatedAt < 7 * 86400000 &&
         Array.isArray(saved.queue) && saved.queue.length && saved.queue.every(id => getTermById(id)) &&
         Number.isInteger(saved.initialLength) && saved.initialLength >= saved.queue.length &&
         Array.isArray(saved.reviewResults) && Array.isArray(saved.studied) &&
@@ -904,13 +953,12 @@
             const index = state.session.queue.indexOf(id);
             if (index >= 0) state.session.queue.splice(index, 1);
             if (state.session.reviewKinds) state.session.reviewKinds.get(id)?.shift();
-            else if (!saved.pendingNext.correct) state.session.queue.push(id);
           });
         }
         saveSession(); renderDailyGoal(); renderLearnStep(); showToast('Продолжаем незавершённое занятие'); return;
       } catch { writeJournal('session', null); }
     }
-    const plan = customQueue ? Ex.buildReviewPlan(customQueue, state.terms) : null;
+    const plan = customQueue ? Ex.buildReviewPlan(customQueue, state.terms,taskBudget) : null;
     const queue = plan ? plan.map((task) => task.termId) : buildLearnQueue(state.terms);
     state.session.reviewKinds = plan ? new Map() : null;
     plan?.forEach(task => {
@@ -929,7 +977,8 @@
   }
 
   function updateLearnProgress() {
-    const done = state.session.initialLength - state.session.queue.length;
+    if(!el.learnProgressFill) return;
+    const done = Math.min(state.session.initialLength,state.session.initialLength - state.session.queue.length + (state.session.scoredPendingIds?.size || 0));
     const pct = Math.max(0, Math.min(100, Math.round((done / state.session.initialLength) * 100)));
     el.learnProgressFill.style.width = pct + '%';
     const track = el.learnProgressFill.parentElement;
@@ -949,18 +998,21 @@
     if (state.session.queue.length === 0) {
       el.exerciseCard.hidden = true;
       el.learnEmpty.hidden = false;
-      el.learnEmpty.querySelector('h2').textContent = state.session.reviewKinds ? 'Повторение завершено!' : 'На сегодня всё!';
+      el.learnEmpty.querySelector('h2').textContent = state.session.reviewKinds ? 'Повторение завершено' : 'Занятие завершено';
       const failed = [...state.session.reviewResults.values()].filter((result) => !result.correct).length;
       const nextReviewAt = state.session.reviewKinds ? [...state.session.reviewKinds.keys()]
         .map(getTermById).filter(Boolean).map(term => Number(term.due_date))
         .filter(date => Number.isFinite(date) && date > Date.now())
         .reduce((earliest, date) => Math.min(earliest, date), Infinity) : Infinity;
       const nextReviewNote = Number.isFinite(nextReviewAt)
-        ? ` Следующее повторение по расписанию — ${new Date(nextReviewAt).toLocaleString('ru-RU', {day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'})}.`
+        ? ` Следующее напоминание — ${new Date(nextReviewAt).toLocaleString('ru-RU', {day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'})}.`
         : '';
       el.learnEmpty.querySelector('p').textContent = state.session.reviewKinds
         ? `Готово: ${wordCountLabel(state.session.reviewKinds.size)}, ${state.session.initialLength} заданий. ${failed ? `Стоит закрепить ещё ${wordCountLabel(failed)} во вкладке «Сложные».` : 'Все слова успешно повторены.'}${nextReviewNote}`
-        : 'Новых и просроченных карточек для изучения сейчас нет. Загляни в «Повторение» или возвращайся позже.';
+        : 'Результаты занятия учтены. В «Повторении» можно начать следующий подход или выбрать дополнительную практику.';
+      const remaining=Math.max(0,dailyGoal()-Srs.currentDailyCount(state.activity));
+      el.btnLearnEmptyToReview.textContent=remaining ? 'Продолжить практику' : 'Перейти к повторению';
+      if(remaining) el.learnEmpty.querySelector('p').textContent+=` До ежедневной цели осталось дать ${remaining} ${answerWord(remaining)}.`;
       return;
     }
     el.exerciseCard.hidden = false;
@@ -1027,9 +1079,9 @@
   }
 
   function advanceAfterAnswer(isCorrect) {
+    state.session.scoredPendingIds?.clear();
     const id = state.session.queue.shift();
     if (state.session.reviewKinds) state.session.reviewKinds.get(id)?.shift();
-    else if (!isCorrect) state.session.queue.push(id); // resurface later this session
     saveSession();
     setTimeout(() => { if (state.screen === 'learn') renderLearnStep(); }, 550);
   }
@@ -1042,21 +1094,25 @@
       result.count++;
       result.correct = result.correct && isCorrect;
       state.session.reviewResults.set(termId, result);
-      if (!isCorrect) { term.last_review_failed = true; if (term.status === 'new') term.status = 'learning'; }
-      // Each task changes practice progress. Long-term SRS advances only once
-      // after the last check: three same-day checks are not three spaced days.
-      if (state.session.reviewKinds.get(termId)?.length === 1) {
-        Srs.applyAnswer(term, result.correct, state.settings.intervalsDays);
-        term.last_review_failed = !result.correct;
-      }
-    } else {
-      Srs.applyAnswer(term, isCorrect, state.settings.intervalsDays);
-      term.last_review_failed = !isCorrect;
     }
+    // Each correct completed check earns a point, even in the same lesson.
+    const previousLevel=term.mastery_level;
+    Srs.applyAnswer(term, isCorrect, state.settings.intervalsDays);
+    (state.session.scoredPendingIds ||= new Set()).add(termId);
+    updateLearnProgress();
     term.practice_points = Math.max(0, (Number(term.practice_points) || 0) + (isCorrect ? 1 : -1));
     term.progress_updated_at=Date.now();
     state.activity = Srs.recordPractice(state.activity);
     renderDailyGoal();
+    if(el.exerciseCard && !el.exerciseCard.querySelector('.matching-grid')) {
+      el.exerciseCard.querySelector('.answer-progress')?.remove();
+      const note=document.createElement('p');note.className='answer-progress';
+      note.textContent=isCorrect
+        ? `${term.mastery_level>previousLevel ? '+1 за правильный ответ.' : 'Ответ сохранён.'} Прогресс слова: ${term.mastery_level} / ${state.settings.intervalsDays.length}.${term.status==='learned' ? ' Слово изучено — иногда оно будет возвращаться для проверки.' : ''}`
+        : `Прогресс слова: ${term.mastery_level} / ${state.settings.intervalsDays.length}. Заработанные ответы сохранены; слово отмечено для дополнительной практики.`;
+      el.exerciseCard.append(note);
+      if(el.answerStatus) el.answerStatus.textContent=note.textContent;
+    }
     const location = state.chunkMap.get(termId);
     if (location) {
       pendingWrites.push({ setId: location.setId, term: JSON.parse(JSON.stringify(term)), activity: { ...state.activity } });
@@ -1261,14 +1317,20 @@
     }
 
     if (exercise.kind === 'type_answer') {
+      const label=document.createElement('label');label.htmlFor='exerciseAnswer';label.className='exercise-answer-label';label.textContent='Твой ответ';
       const input = document.createElement('input');
+      input.id='exerciseAnswer';input.name='answer';
       input.className = 'text-input';
       input.type = 'text';
       input.autocomplete = 'off';
       input.autocapitalize = 'off';
       input.spellcheck = false;
-      input.placeholder = 'Введите ответ или оставьте пустым';
+      input.setAttribute('aria-describedby','exerciseAnswerHelp');
+      input.lang=exercise.answerLanguage || 'ru';
+      const help=document.createElement('p');help.id='exerciseAnswerHelp';help.className='exercise-input-help';help.textContent='Не помнишь? Можно отправить пустой ответ.';
+      card.appendChild(label);
       card.appendChild(input);
+      card.appendChild(help);
       card.appendChild(feedback);
       const actions = buildActionsRow((button) => revealTextHint(card, exercise, button));
       const checkBtn = actions.querySelector('.btn-primary');
@@ -1295,7 +1357,10 @@
     const inputs = [];
     let group = document.createElement('span');
     group.className = 'spelling-word';
-    const appendGroup = () => { if (group.childNodes.length) line.appendChild(group); group = document.createElement('span'); group.className = 'spelling-word'; };
+    const appendGroup = () => {
+      if(group.childNodes.length) {group.style.setProperty('--letter-count',group.childElementCount);line.appendChild(group);}
+      group = document.createElement('span');group.className = 'spelling-word';
+    };
     word.forEach((char, index) => {
       if (/\s/.test(char)) { appendGroup(); return; }
       if (!missing.has(index)) {
@@ -1392,6 +1457,7 @@
       if (saveFailure && !pendingBackupAvailable) {
         btn.disabled = false; showToast('Сначала повтори сохранение прогресса.', 4000); return;
       }
+      state.session.scoredPendingIds?.clear();
       onNext();
     });
     card.appendChild(btn);
@@ -1743,12 +1809,12 @@
   }
 
   function quickReviewPool() {
-    return state.terms.filter((term) => Srs.needsReminder(term, state.settings.intervalsDays));
+    return Srs.reviewPool(state.terms,state.extraPractice);
   }
 
   function chooseReviewTerms(pool, count) {
     const now = Date.now();
-    return Ex.shuffle(pool).sort((a, b) => Srs.reviewPriority(b, now) - Srs.reviewPriority(a, now)).slice(0, count);
+    return Srs.selectSessionTerms(Ex.shuffle(pool),count,now);
   }
 
   function renderReviewSizeControl() {
@@ -1774,7 +1840,7 @@
     el.reviewSize.style.setProperty('--range-progress', `${max === 1 ? 100 : (raw - 1) / (max - 1) * 100}%`);
     el.reviewSize.setAttribute('aria-valuetext', `${state.reviewSize} из ${quickReviewPool().length} слов`);
     el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(quickReviewPool().length)}`;
-    if (!el.btnStartReview.hidden) el.btnStartReview.textContent = `Повторить эти слова · ${effectiveReviewSize(filteredReviewTerms().filter((term) => Srs.needsReminder(term, state.settings.intervalsDays)).length)}`;
+    if (!el.btnStartReview.hidden) el.btnStartReview.textContent = `Повторить эти слова · ${effectiveReviewSize(Srs.reviewPool(filteredReviewTerms(),state.extraPractice).length)}`;
   }
 
   function renderReview() {
@@ -1784,6 +1850,14 @@
     renderReviewSizeControl();
     el.btnQuickReview.hidden = quickPoolSize === 0;
     el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(quickPoolSize)}`;
+    el.btnExtraPractice.textContent=state.extraPractice ? 'Вернуться к плану' : 'Тренироваться раньше срока';
+    el.btnExtraPractice.setAttribute('aria-pressed',String(state.extraPractice));
+    const nextAt=state.terms.filter(term=>term.status!=='new' && Number(term.due_date)>Date.now()).reduce((next,term)=>Math.min(next,term.due_date),Infinity);
+    el.reviewPlanNote.textContent=state.extraPractice
+      ? 'Свободная практика: доступны все слова. Каждый правильный ответ прибавляет прогресс.'
+      : quickPoolSize
+        ? 'Новые и сложные слова — в приоритете. Изученные иногда возвращаются для проверки.'
+        : `На сейчас всё повторено.${Number.isFinite(nextAt) ? ` Следующее напоминание — ${new Date(nextAt).toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}.` : ''} Можно выбрать свободную практику.`;
     el.reviewStats.innerHTML =
       statTile(stats.learning, 'Учатся') +
       statTile(stats.dueToday, 'Сегодня') +
@@ -1802,7 +1876,7 @@
   function filteredReviewTerms() {
     const now = Date.now();
     switch (state.reviewFilter) {
-      case 'due': return state.terms.filter((t) => t.status !== 'new' && Srs.isDue(t, now));
+      case 'due': return Srs.reviewPool(state.terms,false,now);
       case 'difficult': return state.terms.filter(isDifficult);
       case 'learned': return state.terms.filter((t) => t.status === 'learned');
       case 'stale': return state.terms.filter((t) => Srs.isStale(t, 14, now));
@@ -1819,7 +1893,7 @@
   }
 
   const EMPTY_NOTES = {
-    due: 'Нет слов, готовых к повторению прямо сейчас. Загляни позже.',
+    due: 'Доступные слова повторены. Изученные будут иногда возвращаться для проверки.',
     difficult: 'Сложных слов пока нет — отличная работа!',
     learned: 'Пока нет изученных слов. Продолжай заниматься в разделе «Учить».',
     stale: 'Нет слов, которые давно не повторялись.'
@@ -1827,7 +1901,7 @@
 
   function renderReviewList() {
     const items = filteredReviewTerms();
-    const eligible = items.filter((term) => Srs.needsReminder(term, state.settings.intervalsDays));
+    const eligible = Srs.reviewPool(items,state.extraPractice);
     if (items.length === 0) {
       el.reviewList.innerHTML = `<div class="empty-note">${EMPTY_NOTES[state.reviewFilter]}</div>`;
       el.btnStartReview.hidden = true;
@@ -1856,7 +1930,7 @@
     const ids = chooseReviewTerms(pool, effectiveReviewSize(pool.length)).map((term) => term.id);
     if (ids.length === 0) return;
     const saved = readJournal('session');
-    if (saved?.queue?.length && saved.setId === state.activeSetId &&
+    if (hasSessionTasks(saved) &&
         !await confirmDialog('Начать новое повторение вместо незавершённого занятия? Прогресс слов останется.', {title:'Новое повторение?',action:'Начать'})) return;
     showScreen('learn', ids, true);
   }
@@ -1913,16 +1987,15 @@
     const remaining = stats.total - stats.learned;
     const streak = Srs.currentStreak(state.activity);
     el.progressStats.innerHTML =
-      statTile(streak, 'Дней подряд') +
       statTile(stats.total, 'Всего слов') +
       statTile(stats.learned, 'Изучено') +
       statTile(remaining, 'Осталось') +
-      statTile(stats.successRate + '%', 'Успешность');
+      statTile(stats.successRate + '%', 'Точность');
 
     const intervals = state.settings.intervalsDays;
     const pct = Srs.masteryPercent(state.terms, intervals);
     el.progressBarFill.style.width = pct + '%';
-    el.progressBarLabel.textContent = `${pct}% общего освоения · изучено ${stats.learned} из ${stats.total} слов`;
+    el.progressBarLabel.innerHTML = `<strong>${pct}%</strong><span>общий прогресс</span>`;
 
     const sorted = [...state.terms].sort((a, b) => {
       const order = { learning: 0, new: 1, learned: 2 };
@@ -1944,9 +2017,9 @@
           </div>
           <div class="term-source">${escapeHtml(termSourceLabel(t))}</div>
           <div class="word-row-details">
-            <span>Практика: ${pointCountLabel(t.practice_points || 0)}</span>
-            <span>Память: ${Srs.effectiveMastery(t, intervals)} из ${intervals.length} интервалов</span>
-            <span>Следующее повторение: ${nextReview}</span>
+            <span>Верных ответов: ${t.correct_count} / ${t.attempts}</span>
+            <span>Для изучения: ${Srs.effectiveMastery(t, intervals)} / ${intervals.length}</span>
+            <span>${t.status==='learned' ? 'Напоминание: '+nextReview : 'Можно продолжать сейчас'}</span>
             <span class="mastery-dots">${dots}</span>
           </div>
         </div>
@@ -2018,6 +2091,8 @@
   function cacheDom() {
     el = {
       mainHeader: $('#mainHeader'),
+      skipContent:$('#skipContent'),answerStatus:$('#answerStatus'),todayDate:$('#todayDate'),
+      btnHomeContinue:$('#btnHomeContinue'),homeScopeLabel:$('#homeScopeLabel'),
       weekStrip:$('#weekStrip'),
       dailyStreak:$('#dailyStreak'),
       calendarBackdrop:$('#calendarBackdrop'),btnCloseCalendar:$('#btnCloseCalendar'),
@@ -2077,6 +2152,7 @@
       reviewStats: $('#reviewStats'),
       reviewStreak: $('#reviewStreak'),
       btnQuickReview: $('#btnQuickReview'),
+      btnExtraPractice:$('#btnExtraPractice'),reviewPlanNote:$('#reviewPlanNote'),
       btnBrowseCards: $('#btnBrowseCards'),
       reviewSize: $('#reviewSize'),
       reviewSizeValue: $('#reviewSizeValue'),
@@ -2135,6 +2211,8 @@
       btn.addEventListener('click', () => showScreen(btn.dataset.screen));
     });
     el.btnBackHome.addEventListener('click', () => showScreen('home'));
+    el.btnHomeContinue.addEventListener('click',openHomeSession);
+    el.skipContent.addEventListener('click',event=>{event.preventDefault();const screen=el.screens[state.screen];screen.tabIndex=-1;screen.focus({preventScroll:false});});
     el.dailyStreak.addEventListener('click',openCalendar);
     el.reviewStreak.addEventListener('click',openCalendar);
     el.btnCloseCalendar.addEventListener('click',closeCalendar);
@@ -2263,6 +2341,7 @@
       if (event.target === el.surfaceBackdrop) closeSurface();
     });
     el.btnQuickReview.addEventListener('click', startQuickReview);
+    el.btnExtraPractice.addEventListener('click',()=>{state.extraPractice=!state.extraPractice;renderReview();});
     el.btnBrowseCards.addEventListener('click', openFlashcards);
     el.btnCloseFlashcards.addEventListener('click', closeFlashcards);
     el.flashcardFace.addEventListener('click', () => {
@@ -2302,7 +2381,10 @@
       renderReviewList();
     });
 
-    el.btnLearnEmptyToReview.addEventListener('click', () => showScreen('review'));
+    el.btnLearnEmptyToReview.addEventListener('click', () => {
+      if(Srs.currentDailyCount(state.activity)<dailyGoal() && !Srs.reviewPool(state.terms).length) openHomeSession();
+      else showScreen('review');
+    });
     document.addEventListener('click', (event) => {
       if (!event.target.closest('.set-menu-wrap')) {
         el.setMenu.hidden = true;

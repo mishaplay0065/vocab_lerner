@@ -296,6 +296,11 @@
     const variants = rawAnswerVariants(term.term);
     const word = (variants[0] || term.term).trim();
     const spellingTerm = { ...term, term: word };
+    // Long compounds cannot keep readable, individually editable letter cells on a phone.
+    if(word.split(/\s+/).some(part=>Array.from(part).length>14)) return {
+      ...buildTypeAnswer(spellingTerm),prompt:term.translation,promptLabel:'Напиши слово по переводу',
+      correctAnswer:word,answerSide:'term'
+    };
     if (!/[a-zA-Zа-яёА-ЯЁäöüßÄÖÜ]/.test(word)) return buildSpellingScramble(spellingTerm);
     // Very short single words are easier to scramble than to blank out.
     if (word.length <= 3 && !word.includes(' ')) return buildSpellingScramble(spellingTerm);
@@ -379,6 +384,7 @@
       for (const id of priority) {
         const term = byId.get(id);
         if (goals.get(id) !== round - 1 || (term?.status === 'learned' && !term?.last_review_failed) ||
+            (term?.status!=='learned' && round>Math.max(1,5-(Number(term?.mastery_level)||0))) ||
             (round === 3 && !(term?.last_review_failed || term?.status === 'new'))) continue;
         goals.set(id, round); spare--;
         if (!spare) break;
