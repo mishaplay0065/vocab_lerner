@@ -57,7 +57,8 @@
     settings: null,
     activity: { lastDay: null, streak: 0, longest: 0, dailyCount: 0, dailyGoal: 5 },
     screen: 'loading',       // loading | import | home | learn | review | progress
-    importMode: 'first',    // 'first' (no sets yet) | 'add' (adding another set)
+    importMode: 'first',    // 'first' | 'add' (new set) | 'append' (existing set)
+    importReturnScreen:'home',
     session: {
       queue: [],
       initialLength: 0,
@@ -638,12 +639,21 @@
   }
 
   function openImportScreen(mode) {
+    if(state.screen!=='import') state.importReturnScreen=['home','review','progress'].includes(state.screen) ? state.screen : 'home';
     state.importMode = mode;
-    el.importTitle.textContent = mode === 'add' ? 'Новый набор слов' : 'Учить слова стало проще';
-    el.importSubtitle.textContent = mode === 'add'
+    const appending=mode==='append';
+    el.importTitle.textContent = appending ? 'Добавить слова в набор' : mode === 'add' ? 'Новый набор слов' : 'Учить слова стало проще';
+    el.importSubtitle.textContent = appending ? 'Выбери набор и загрузи CSV-файл. Совпадающие слова с тем же переводом будут пропущены.' : mode === 'add'
       ? 'Загрузи CSV-файл для ещё одного набора — он появится в списке рядом с остальными.'
       : 'Загрузи CSV-файл со словами и фразами — приложение построит для тебя карточки и расписание повторений.';
-    el.btnCancelImport.hidden = mode !== 'add';
+    el.btnCancelImport.hidden = mode === 'first';
+    el.newSetFields.hidden=appending;
+    el.importTargetSet.hidden=el.importTargetLabel.hidden=!appending;
+    el.btnLoadDemo.hidden=appending;
+    if(appending) {
+      el.importTargetSet.innerHTML=[...state.sets].sort((a,b)=>setCreationTime(b)-setCreationTime(a)).map(set=>`<option value="${escapeHtml(set.id)}">${escapeHtml(set.name)} · ${escapeHtml(languageLabel(set.language))}</option>`).join('');
+      el.importTargetSet.value=defaultManualSetId();
+    }
     el.setNameInput.value = '';
     el.setLanguageSelect.value = 'auto';
     el.setLanguageOther.value = '';
@@ -654,7 +664,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Import flow (creates a new set; never overwrites existing ones)
+  // Import flow: new set or an atomic, append-only import into an existing set.
   // ---------------------------------------------------------------------
   function readFileAsText(file) {
     return new Promise((resolve, reject) => {
@@ -690,14 +700,30 @@
   async function handleCsvText(text, defaultName) {
     if (importBusy) return;
     importBusy = true;
-    el.btnLoadDemo.disabled = true; el.fileInput.disabled = true; el.btnCancelImport.disabled = true;
+    el.btnLoadDemo.disabled = true; el.fileInput.disabled = true; el.btnCancelImport.disabled = true;el.importTargetSet.disabled=true;
+    let appended=false;
     try {
     const { items, errors, warnings } = Csv.parseCsv(text);
     renderImportErrors(errors, warnings);
     if (errors.length || items.length === 0) return;
 
-    const name = (el.setNameInput.value || '').trim() || defaultName;
     const terms = items.map((it) => Srs.makeTerm(it));
+    if(state.importMode==='append') {
+      const target=state.sets.find(set=>set.id===el.importTargetSet.value);
+      if(!target) {renderImportErrors(['Выбери существующий набор.'],warnings);return;}
+      if(!await confirmDialog(`Добавить ${wordCountLabel(terms.length)} из файла в «${target.name}»? Совпадающие слово и перевод будут пропущены.`,{title:'Добавить слова?',action:'Добавить'})) return;
+      await flushPendingWrites();
+      if(pendingWrites.length) {renderImportErrors(['Сначала сохрани ответы: проверь соединение и повтори сохранение. Затем загрузи файл снова.'],warnings);return;}
+      const result=await state.store.appendTerms(target.id,terms);
+      appended=true;
+      await refreshSetsList();state.activeSetId=target.id;
+      try {await state.store.setActiveSetId(target.id);} catch(error) {console.warn('Words saved; active preference unavailable',error);}
+      await loadActiveSetTerms();renderSetSwitcher();
+      showScreen(state.importReturnScreen);
+      showToast(`Добавлено: ${result.added}. Уже в наборе: ${result.skipped}.`,4200);
+      return;
+    }
+    const name = (el.setNameInput.value || '').trim() || defaultName;
     const chosenLanguage = selectedLanguage(el.setLanguageSelect, el.setLanguageOther);
     if (!chosenLanguage) { el.setLanguageOther.reportValidity(); return; }
     const language = chosenLanguage === 'auto' ? inferSetLanguage(terms) : chosenLanguage;
@@ -717,10 +743,15 @@
       : `Набор «${name}» создан: ${terms.length} слов`, missingArticles ? 5200 : 2200);
     } catch (error) {
       console.error('Import failed', error);
-      renderImportErrors(['Не удалось сохранить набор. Старые наборы не изменены. Проверь соединение и попробуй снова.'], []);
+      if(appended) {
+        el.importErrors.hidden=false;
+        el.importErrors.textContent='Слова добавлены, но не удалось обновить экран. Перезагрузи приложение.';
+      } else renderImportErrors([state.importMode==='append'
+        ? state.store?._uncertain ? 'Telegram не подтвердил сохранение. Перезагрузи приложение перед повторной загрузкой файла.' : 'Не удалось добавить слова. '+(error.message || 'Проверь соединение и попробуй снова.')
+        : 'Не удалось сохранить набор. Старые наборы не изменены. Проверь соединение и попробуй снова.'], []);
     } finally {
       importBusy = false;
-      el.btnLoadDemo.disabled = false; el.fileInput.disabled = false; el.btnCancelImport.disabled = false;
+      el.btnLoadDemo.disabled = false; el.fileInput.disabled = false; el.btnCancelImport.disabled = false;el.importTargetSet.disabled=false;
     }
   }
 
@@ -997,6 +1028,7 @@
 
   function renderLearnStep() {
     resetAnswerDock();
+    el.exerciseCard?.removeAttribute('data-kind');
     updateLearnProgress();
 
     if (state.session.queue.length === 0) {
@@ -1245,6 +1277,7 @@
   function renderExercise(exercise) {
     const card = el.exerciseCard;
     card.innerHTML = '';
+    card.dataset.kind=exercise?.kind || '';
 
     if (!exercise || !String(exercise.correctAnswer || exercise.answer || '').trim()) {
       renderUnavailableCard(card, 'У задания нет ответа. Проверь запись слова в «Прогрессе».');
@@ -1257,7 +1290,7 @@
     card.appendChild(kindEl);
 
     const exerciseTerm = exercise.termId ? getTermById(exercise.termId) : null;
-    if (exerciseTerm) appendTermSource(card, exerciseTerm);
+    if (exerciseTerm && !['spelling_missing','spelling_scramble'].includes(exercise.kind)) appendTermSource(card, exerciseTerm);
 
     if (exercise.kind === 'flashcard') {
       renderExerciseFlashcard(card, exercise);
@@ -1318,27 +1351,27 @@
     }
 
     if (exercise.kind === 'type_answer') {
+      const form=document.createElement('form');form.className='exercise-answer-form';form.noValidate=true;
       const label=document.createElement('label');label.htmlFor='exerciseAnswer';label.className='exercise-answer-label';label.textContent='Твой ответ';
       const input = document.createElement('input');
       input.id='exerciseAnswer';input.name='answer';
       input.className = 'text-input';
       input.type = 'text';
+      input.enterKeyHint='done';
       input.autocomplete = 'off';
       input.autocapitalize = 'off';
       input.spellcheck = false;
       input.setAttribute('aria-describedby','exerciseAnswerHelp');
       input.lang=exercise.answerLanguage || 'ru';
       const help=document.createElement('p');help.id='exerciseAnswerHelp';help.className='exercise-input-help';help.textContent='Не помнишь? Можно отправить пустой ответ.';
-      card.appendChild(label);
-      card.appendChild(input);
-      card.appendChild(help);
-      card.appendChild(feedback);
+      form.append(label,input,help,feedback);
       const actions = buildActionsRow((button) => revealTextHint(card, exercise, button));
       const checkBtn = actions.querySelector('.btn-primary');
       checkBtn.textContent = 'Проверить';
-      checkBtn.addEventListener('click', () => handleTypedAnswer(input.value, exercise, input, feedback, checkBtn));
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') checkBtn.click(); });
-      card.appendChild(actions);
+      checkBtn.type='submit';
+      form.addEventListener('submit',event=>{event.preventDefault();handleTypedAnswer(input.value,exercise,input,feedback,checkBtn);});
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.keyCode!==229) {e.preventDefault();checkBtn.click();} });
+      form.appendChild(actions);card.appendChild(form);
       setTimeout(() => input.focus(), 50);
       return;
     }
@@ -1350,6 +1383,7 @@
   }
 
   function renderMissingLetters(card, exercise, feedback) {
+    const form=document.createElement('form');form.className='exercise-answer-form';form.noValidate=true;
     const word = Array.from(exercise.correctAnswer || '');
     const missing = new Set(exercise.missingPositions || []);
     const line = document.createElement('div');
@@ -1374,6 +1408,7 @@
       const input = document.createElement('input');
       input.className = 'spelling-box';
       input.type = 'text';
+      input.enterKeyHint='done';input.lang=exercise.answerLanguage || 'und';
       input.maxLength = 1;
       input.autocomplete = 'off';
       input.autocapitalize = 'off';
@@ -1387,15 +1422,15 @@
       renderUnavailableCard(card, 'В этом слове нет букв для заполнения.');
       return;
     }
-    card.appendChild(line);
-    card.appendChild(feedback);
+    form.append(line,feedback);
     const actions = buildActionsRow((button) => revealTextHint(card, exercise, button));
     const checkBtn = actions.querySelector('.btn-primary');
     const check = () => {
       const answer = word.map((char, index) => inputs.find((item) => item.index === index)?.input.value || (missing.has(index) ? '' : char)).join('');
       handleTypedAnswer(answer, exercise, inputs.map((item) => item.input), feedback, checkBtn);
     };
-    checkBtn.addEventListener('click', check);
+    checkBtn.type='submit';
+    form.addEventListener('submit',event=>{event.preventDefault();check();});
     inputs.forEach(({ input }, position) => {
       input.addEventListener('input', (event) => {
         if (event.isComposing) return;
@@ -1408,7 +1443,7 @@
           inputs[position - 1].input.focus();
           inputs[position - 1].input.value = '';
         }
-        if (event.key === 'Enter') { event.preventDefault(); checkBtn.click(); }
+        if (event.key === 'Enter' && !event.isComposing && event.keyCode!==229) { event.preventDefault(); checkBtn.click(); }
       });
       input.addEventListener('paste', (event) => {
         const letters = Array.from(event.clipboardData?.getData('text') || '').filter((char) => !/\s/.test(char));
@@ -1418,7 +1453,7 @@
         inputs[Math.min(position + letters.length, inputs.length - 1)].input.focus();
       });
     });
-    card.appendChild(actions);
+    form.appendChild(actions);card.appendChild(form);
     setTimeout(() => inputs[0].input.focus(), 50);
   }
 
@@ -1512,8 +1547,7 @@
       if (btn.textContent === exercise.correctAnswer) btn.classList.add('correct');
       else if (btn.textContent === chosen && !isCorrect) btn.classList.add('incorrect');
     });
-    showFeedback(feedback, isCorrect, exercise.correctAnswer,
-      !isCorrect && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
+    showFeedback(feedback, isCorrect, exercise.correctAnswer);
     scoreTerm(exercise.termId, isCorrect);
     appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(isCorrect));
   }
@@ -1539,7 +1573,7 @@
       showFeedback(feedback, correct, exercise.correctAnswer,
         correct && exercise.answerLanguage === 'en' && Ex.isEnglishSpellingVariant(value, exercise.correctAnswer)
           ? 'Британский и американский варианты написания равнозначны.'
-          : !correct && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
+          : !correct && exercise.kind==='type_answer' && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
       scoreTerm(exercise.termId, correct);
       appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(correct));
     };
@@ -1558,17 +1592,6 @@
       };
       el.exerciseCard.append(accept);
     };
-    if (!isCorrect && exercise.kind === 'type_answer' && exercise.answerSide === 'translation' && value.trim() &&
-        (exercise.failedAttempts || 0) >= 2) {
-      feedback.hidden = false; feedback.className = 'feedback bad';
-      feedback.innerHTML = `В наборе указан ответ: <strong>${escapeHtml(exercise.correctAnswer)}</strong>. Если твой перевод тоже верен, добавь его как вариант.`;
-      checkBtn.remove();
-      const reject = document.createElement('button'); reject.type = 'button'; reject.className = 'btn btn-ghost alias-reject';
-      reject.textContent = 'Считать ошибкой';
-      reject.onclick = () => { el.exerciseCard.querySelector('.alias-accept')?.remove(); reject.remove(); finish(false); };
-      offerAlias(); el.exerciseCard.append(reject);
-      return;
-    }
     if (offerRetry(exercise, isCorrect, feedback)) {
       if (!isCorrect && exercise.kind === 'type_answer' && exercise.answerSide === 'translation' && value.trim()) offerAlias();
       const fields = Array.isArray(input) ? input : [input];
@@ -1623,8 +1646,7 @@
       const isCorrect = Ex.answersMatch(userAnswer, exercise.correctAnswer, { language: exercise.answerLanguage, strict: true });
       if (offerRetry(exercise, isCorrect, feedback)) return;
       state.session.answered = true;
-      showFeedback(feedback, isCorrect, exercise.correctAnswer,
-        !isCorrect && exercise.answerLanguage === 'de' ? 'В немецком учитываются артикль и заглавная буква существительного.' : '');
+      showFeedback(feedback, isCorrect, exercise.correctAnswer);
       scoreTerm(exercise.termId, isCorrect);
       appendContinueButton(el.exerciseCard, () => advanceAfterAnswer(isCorrect));
     }
@@ -1877,7 +1899,7 @@
     renderReviewSizeControl();
     el.btnQuickReview.hidden = quickPoolSize === 0;
     el.btnQuickReview.textContent = `Повторить сейчас · ${effectiveReviewSize(quickPoolSize)}`;
-    el.btnExtraPractice.textContent=state.extraPractice ? 'Вернуться к плану' : 'Тренироваться раньше срока';
+    el.btnExtraPractice.textContent=state.extraPractice ? 'Обычное повторение' : 'Повторять любые слова';
     el.btnExtraPractice.setAttribute('aria-pressed',String(state.extraPractice));
     const nextAt=state.terms.filter(term=>term.status!=='new' && Number(term.due_date)>Date.now()).reduce((next,term)=>Math.min(next,term.due_date),Infinity);
     el.reviewPlanNote.textContent=state.extraPractice
@@ -1944,16 +1966,16 @@
         ${badgeFor(t)}
       </div>
     `).join('');
-    el.btnStartReview.hidden = eligible.length === 0;
+    el.btnStartReview.hidden = eligible.length === 0 || state.reviewFilter==='due';
     el.btnStartReview.textContent = `Повторить эти слова · ${effectiveReviewSize(eligible.length)}`;
-    el.btnStartReview.onclick = () => {
-      const ids = chooseReviewTerms(eligible, effectiveReviewSize(eligible.length)).map((t) => t.id);
-      showScreen('learn', ids);
-    };
+    el.btnStartReview.onclick = () => startReviewTerms(eligible);
   }
 
   async function startQuickReview() {
-    const pool = quickReviewPool();
+    return startReviewTerms(quickReviewPool());
+  }
+
+  async function startReviewTerms(pool) {
     const ids = chooseReviewTerms(pool, effectiveReviewSize(pool.length)).map((term) => term.id);
     if (ids.length === 0) return;
     const saved = readJournal('session');
@@ -2130,6 +2152,7 @@
       btnSetMenu: $('#btnSetMenu'),
       setMenu: $('#setMenu'),
       btnAddSet: $('#btnAddSet'),
+      btnImportWords:$('#btnImportWords'),
       btnAddWord: $('#btnAddWord'),
       btnEditLanguage: $('#btnEditLanguage'),
       btnDeleteSet: $('#btnDeleteSet'),
@@ -2149,6 +2172,7 @@
       importTitle: $('#importTitle'),
       importSubtitle: $('#importSubtitle'),
       setNameInput: $('#setNameInput'),
+      newSetFields:$('#newSetFields'),importTargetSet:$('#importTargetSet'),importTargetLabel:$('#importTargetLabel'),
       setLanguageSelect: $('#setLanguageSelect'),
       setLanguageOther: $('#setLanguageOther'),
       fileInput: $('#fileInput'),
@@ -2339,7 +2363,7 @@
     el.btnLoadDemo.addEventListener('click', () => handleCsvText(DEMO_CSV, 'Демо-набор'));
 
     el.btnCancelImport.addEventListener('click', () => {
-      showScreen(state.sets.length ? 'home' : 'import');
+      showScreen(state.sets.length ? state.importReturnScreen : 'import');
     });
 
     el.setSelect.addEventListener('change', (e) => switchActiveSet(e.target.value));
@@ -2348,6 +2372,7 @@
       el.btnSetMenu.setAttribute('aria-expanded', String(!el.setMenu.hidden));
     });
     el.btnAddSet.addEventListener('click', () => openImportScreen('add'));
+    el.btnImportWords.addEventListener('click', () => openImportScreen('append'));
     el.btnAddWord.addEventListener('click', () => openSurface('word'));
     el.btnEditLanguage.addEventListener('click', () => openSurface('language'));
     el.btnDeleteSet.addEventListener('click', () => deleteActiveSet());

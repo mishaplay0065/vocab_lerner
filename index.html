@@ -13,8 +13,8 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%234255ff'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-family='Arial' font-size='34' font-weight='700' fill='white'%3EV%3C/text%3E%3C/svg%3E">
 <script async src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="preload" href="InterVariable.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="style.css?v=23">
-<link rel="stylesheet" href="interface.css?v=23">
+<link rel="stylesheet" href="style.css?v=24">
+<link rel="stylesheet" href="interface.css?v=24">
 </head>
 <body>
 
@@ -47,6 +47,7 @@
         <button class="icon-btn" id="btnSetMenu" title="Действия с набором" aria-label="Действия с набором" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg></button>
         <div class="dropdown-menu" id="setMenu" hidden>
           <button id="btnAddWord"><span>＋</span>Добавить слово</button>
+          <button id="btnImportWords"><span>＋</span>Добавить из CSV</button>
           <button id="btnEditLanguage"><span>文</span>Язык набора</button>
           <button id="btnAddSet"><span>▤</span>Новый набор</button>
           <button class="dropdown-danger" id="btnDeleteSet"><span>⌫</span>Удалить набор</button>
@@ -66,6 +67,9 @@
       <p class="muted" id="importSubtitle">Загрузи CSV-файл со словами и фразами — приложение построит для тебя карточки и расписание повторений.</p>
     </div>
 
+    <label class="field-label" for="importTargetSet" id="importTargetLabel" hidden>Добавить в набор</label>
+    <select id="importTargetSet" class="text-input" hidden></select>
+    <div id="newSetFields" class="import-set-fields">
     <label class="field-label" for="setNameInput">Название набора</label>
     <input type="text" id="setNameInput" class="text-input" placeholder="Например: English A1" maxlength="60">
 
@@ -90,6 +94,7 @@
     <input id="setLanguageOther" class="text-input" type="text" maxlength="40" placeholder="Название языка" aria-label="Название другого языка" hidden>
 
     <p class="muted language-auto-note">Автоопределение рассчитано на английский и немецкий. Для других языков выбери язык вручную.</p>
+    </div>
     <label class="dropzone" id="dropzone" for="fileInput" tabindex="0" role="button">
       <div class="dropzone-icon">＋</div>
       <div class="dropzone-text">Выбрать CSV-файл</div>
@@ -148,7 +153,7 @@
     <h1 class="screen-title">Повторение</h1>
     <button class="streak-card" id="reviewStreak" type="button" aria-label="Открыть календарь серии"></button>
     <div class="review-actions"><button class="btn btn-primary btn-quick-review" id="btnQuickReview">Повторить сейчас</button><button class="btn btn-ghost" id="btnBrowseCards">Карточки</button></div>
-    <div class="review-plan"><p id="reviewPlanNote"></p><button class="btn btn-ghost" id="btnExtraPractice" type="button" aria-pressed="false">Тренироваться раньше срока</button></div>
+    <div class="review-plan"><p id="reviewPlanNote"></p><button class="btn btn-ghost" id="btnExtraPractice" type="button" aria-pressed="false">Повторять любые слова</button></div>
     <div class="review-size-control" id="reviewSizeControl">
       <div class="review-size-head">
         <label for="reviewSize">Сколько слов повторить</label>
@@ -167,8 +172,8 @@
       <button class="tab" data-filter="stale">Давно не видел</button>
     </div>
 
+    <button class="btn btn-primary review-filter-start" id="btnStartReview" hidden>Повторить эти слова</button>
     <div class="review-list" id="reviewList"></div>
-    <button class="btn btn-primary btn-fixed-bottom" id="btnStartReview" hidden>Повторить эти слова</button>
   </section>
 
   <!-- ===================== PROGRESS SCREEN ===================== -->
@@ -309,10 +314,10 @@
   </section>
 </div>
 
-<script src="srs.js?v=23"></script>
-<script src="storage.js?v=23"></script>
-<script src="csv.js?v=23"></script>
-<script src="exercises.js?v=23"></script>
-<script src="app.js?v=23"></script>
+<script src="srs.js?v=24"></script>
+<script src="storage.js?v=24"></script>
+<script src="csv.js?v=24"></script>
+<script src="exercises.js?v=24"></script>
+<script src="app.js?v=24"></script>
 </body>
 </html>

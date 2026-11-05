@@ -60,6 +60,12 @@ body::before{content:"";display:block;position:fixed;inset:0 0 auto;height:var(-
 .review-plan{display:grid;gap:12px;}
 .review-plan p,.progress-explanation{font-size:.875rem;line-height:1.6;color:var(--ink-soft);margin:0;}
 .review-plan .btn{justify-self:start;font-size:.875rem;min-height:44px;}
+.review-filter-start{position:static;width:100%;max-width:none;transform:none!important;box-shadow:none;}
+.review-actions .btn,#btnExtraPractice{transform:none!important;transition:background-color 150ms ease-out,color 150ms ease-out;}
+.review-actions .btn:hover,.review-filter-start:hover{box-shadow:none!important;}
+#reviewStats .stat-tile{border:0;background:transparent;box-shadow:none;padding:8px 0;}
+#reviewList{padding-bottom:0;}
+.import-set-fields{display:grid;gap:12px;}
 .answer-progress{margin:0;font-size:.875rem;line-height:1.6;color:var(--ink-soft);}
 .progress-explanation{margin-block-start:14px;}
 .language-auto-note{font-size:.875rem;line-height:1.6;}
@@ -76,8 +82,17 @@ body::before{content:"";display:block;position:fixed;inset:0 0 auto;height:var(-
 .goal-preferences .goal-settings{margin-block-start:12px;}
 .exercise-answer-label{font-size:.875rem;font-weight:500;color:var(--ink);margin-block-end:-10px;}
 .exercise-input-help{font-size:.8125rem;line-height:1.5;color:var(--ink-soft);margin:0;}
+.exercise-answer-form{display:grid;gap:16px;min-width:0;margin:0;}
 .spelling-word{display:grid;grid-template-columns:repeat(var(--letter-count),minmax(0,1fr));width:calc(var(--letter-count)*29px - 2px);max-width:100%;flex:0 1 auto;gap:2px;}
 .spelling-word .spelling-letter,.spelling-word .spelling-box{width:100%;min-width:0;font-size:clamp(16px,5vw,21px);}
+.exercise-card[data-kind="spelling_missing"] .spelling-line{gap:14px 12px;padding-block:8px;}
+.exercise-card[data-kind="spelling_missing"] .spelling-word{width:calc(var(--letter-count)*25px - 1px);gap:1px;}
+.exercise-card[data-kind="spelling_missing"] .spelling-letter,
+.exercise-card[data-kind="spelling_missing"] .spelling-box{height:36px;font-family:var(--font-body);font-weight:450;font-size:clamp(16px,5vw,21px);}
+.exercise-card[data-kind="spelling_missing"] .spelling-box{border:0;border-bottom:1px solid var(--accent);border-radius:6px 6px 0 0;background:var(--surface-alt);box-shadow:none;padding:0;caret-color:var(--accent-dark);}
+.exercise-card[data-kind="spelling_missing"] .spelling-box:focus{background:var(--accent-soft);box-shadow:none;outline:2px solid var(--accent-dark);outline-offset:2px;border-radius:6px;}
+.exercise-card[data-kind="spelling_missing"] .exercise-actions .hint-btn{flex:0 1 auto;border:0;background:transparent;box-shadow:none;text-decoration:underline;text-underline-offset:4px;padding-inline:6px;font-size:.875rem;}
+.exercise-card[data-kind="spelling_missing"] .exercise-actions .btn-primary{flex:1 1 140px;max-width:220px;}
 .word-row-details,.term-source{font-size:.8125rem;line-height:1.6;}
 .word-row-details{gap:10px 16px;}
 .word-row-top{display:grid;gap:6px;}

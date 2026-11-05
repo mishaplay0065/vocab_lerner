@@ -296,6 +296,29 @@
       return {terms,chunkMap,chunkCount:entry.chunkCount};
     }
     async addTerm(id, term) { return this._editTerms(id, term, false); }
+    async appendTerms(id, incoming) {
+      if(!Array.isArray(incoming) || !incoming.length || incoming.some(term=>!term || typeof term.term!=='string' || !term.term.trim() || typeof term.translation!=='string' || !term.translation.trim()))
+        throw new StorageError('В файле должны быть слова и переводы.','invalid');
+      const snapshots=JSON.parse(JSON.stringify(incoming));
+      return this._mutate(async()=>{
+        const sets=await this.listSets(),entry=sets.find(set=>set.id===id);
+        if(!entry) throw new StorageError('Набор больше не существует. Выбери другой набор.','missing_set');
+        const {terms}=await this.loadSetTerms(id,entry);
+        const normalize=value=>value.trim().normalize('NFC').replace(/\s+/g,' ').toLocaleLowerCase();
+        const key=term=>JSON.stringify([normalize(term.term),normalize(term.translation)]);
+        const seen=new Set(terms.map(key)),ids=new Set(terms.map(term=>term.id)),added=[];
+        let skipped=0;
+        for(const term of snapshots) {
+          const identity=key(term);
+          if(seen.has(identity)) {skipped++;continue;}
+          seen.add(identity);
+          if(typeof term.id!=='string' || !term.id || ids.has(term.id)) term.id=this._newId();
+          ids.add(term.id);added.push(term);
+        }
+        if(added.length) await this._replaceTerms(sets,entry,[...terms,...added]);
+        return {added:added.length,skipped,total:terms.length+added.length};
+      });
+    }
     async updateTerm(id, term) { return this._editTerms(id, term, true); }
     _progressFields(term) {
       const fields=['attempts','correct_count','practice_points','srs_version','mastery_level','last_mastery_at','last_lapse_at','due_date','last_seen','status','last_review_failed','translationAliases','progress_updated_at'];
