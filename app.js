@@ -201,7 +201,8 @@
     const content = tg.contentSafeAreaInset || {};
     ['top', 'right', 'bottom', 'left'].forEach((side) => {
       const deviceValue = Number(device[side]);
-      const contentValue = Number(content[side]);
+      let contentValue = Number(content[side]);
+      if(side==='top' && tg.isFullscreen && ['ios','android'].includes(tg.platform) && (!Number.isFinite(contentValue) || contentValue===0)) contentValue=56;
       if (Number.isFinite(deviceValue)) root.style.setProperty(`--telegram-safe-${side}`, `${deviceValue}px`);
       else root.style.removeProperty(`--telegram-safe-${side}`);
       if (Number.isFinite(contentValue)) root.style.setProperty(`--telegram-content-safe-${side}`, `${contentValue}px`);
@@ -219,6 +220,7 @@
       if (typeof tg.onEvent === 'function') {
         tg.onEvent('safeAreaChanged', () => updateTelegramSafeArea(tg));
         tg.onEvent('contentSafeAreaChanged', () => updateTelegramSafeArea(tg));
+        tg.onEvent('viewportChanged', () => updateTelegramSafeArea(tg));
         tg.onEvent('fullscreenChanged', () => requestAnimationFrame(() => updateTelegramSafeArea(tg)));
       }
       if (tg.setHeaderColor && tg.isVersionAtLeast && tg.isVersionAtLeast('6.1')) {
@@ -403,6 +405,7 @@
     navigationVersion++;
     console.log('renderScreen:', name);
     state.screen = name;
+    resetAnswerDock();
     document.title=`${SCREEN_TITLES[name]} — Vocab`;
     window.scrollTo(0, 0);
     if (el.setMenu) {
@@ -993,6 +996,7 @@
   }
 
   function renderLearnStep() {
+    resetAnswerDock();
     updateLearnProgress();
 
     if (state.session.queue.length === 0) {
@@ -1083,7 +1087,7 @@
     const id = state.session.queue.shift();
     if (state.session.reviewKinds) state.session.reviewKinds.get(id)?.shift();
     saveSession();
-    setTimeout(() => { if (state.screen === 'learn') renderLearnStep(); }, 550);
+    if(state.screen==='learn') {renderLearnStep();window.scrollTo(0,0);}
   }
 
   async function scoreTerm(termId, isCorrect) {
@@ -1104,14 +1108,9 @@
     term.progress_updated_at=Date.now();
     state.activity = Srs.recordPractice(state.activity);
     renderDailyGoal();
-    if(el.exerciseCard && !el.exerciseCard.querySelector('.matching-grid')) {
-      el.exerciseCard.querySelector('.answer-progress')?.remove();
-      const note=document.createElement('p');note.className='answer-progress';
-      note.textContent=isCorrect
-        ? `${term.mastery_level>previousLevel ? '+1 за правильный ответ.' : 'Ответ сохранён.'} Прогресс слова: ${term.mastery_level} / ${state.settings.intervalsDays.length}.${term.status==='learned' ? ' Слово изучено — иногда оно будет возвращаться для проверки.' : ''}`
-        : `Прогресс слова: ${term.mastery_level} / ${state.settings.intervalsDays.length}. Заработанные ответы сохранены; слово отмечено для дополнительной практики.`;
-      el.exerciseCard.append(note);
-      if(el.answerStatus) el.answerStatus.textContent=note.textContent;
+    if(el.answerDockProgress && !el.exerciseCard.querySelector('.matching-grid')) {
+      el.answerDockProgress.textContent=`${term.mastery_level} / ${state.settings.intervalsDays.length}${term.status==='learned' ? ' · Изучено' : term.mastery_level>previousLevel ? ' · +1' : ''}`;
+      if(el.answerStatus) el.answerStatus.textContent=`${isCorrect ? 'Верно.' : 'Неверно.'} Прогресс слова: ${term.mastery_level} из ${state.settings.intervalsDays.length}.`;
     }
     const location = state.chunkMap.get(termId);
     if (location) {
@@ -1265,10 +1264,12 @@
       return;
     }
 
-    const promptLabel = document.createElement('div');
-    promptLabel.className = 'exercise-prompt-label';
-    promptLabel.textContent = exercise.promptLabel;
-    card.appendChild(promptLabel);
+    if(exercise.kind!=='multiple_choice') {
+      const promptLabel = document.createElement('div');
+      promptLabel.className = 'exercise-prompt-label';
+      promptLabel.textContent = exercise.promptLabel;
+      card.appendChild(promptLabel);
+    }
 
     if (exercise.prompt && exercise.kind !== 'spelling_missing') {
       const promptRow = document.createElement('div');
@@ -1433,7 +1434,7 @@
   }
 
   function showFeedback(feedback, isCorrect, correctAnswer, note) {
-    const card = feedback.closest('.exercise-card');
+    const card = feedback.closest('.exercise-card') || el.exerciseCard;
     if (card) {
       card.querySelectorAll('.exercise-hint, .hint-actions, .hint-btn').forEach((hint) => hint.remove());
     }
@@ -1444,11 +1445,28 @@
       : `✗ Неверно. Правильный ответ: <strong>${escapeHtml(correctAnswer)}</strong>${note ? `<span class="feedback-note">${escapeHtml(note)}</span>` : ''}`;
   }
 
+  function resetAnswerDock() {
+    if(!el.answerDock) return;
+    el.answerDock.hidden=true;
+    el.answerDockFeedback.replaceChildren();el.answerDockActions.replaceChildren();
+    el.answerDockProgress.textContent='';
+    document.documentElement.style.setProperty('--answer-dock-height','0px');
+  }
+
+  function measureAnswerDock() {
+    if(el.answerDock && !el.answerDock.hidden) document.documentElement.style.setProperty('--answer-dock-height',`${Math.ceil(el.answerDock.getBoundingClientRect().height)}px`);
+  }
+
+  function presentAnswerFeedback(feedback) {
+    el.answerDockFeedback.replaceChildren(feedback);
+    el.answerDock.hidden=false;
+    measureAnswerDock();
+  }
+
   function appendContinueButton(card, onNext) {
     const btn = document.createElement('button');
     btn.className = 'btn btn-primary';
     btn.textContent = 'Далее';
-    btn.style.marginTop = '8px';
     btn.addEventListener('click', async () => {
       btn.disabled = true;
       // A durable local journal lets the next task start while the cloud write
@@ -1460,7 +1478,12 @@
       state.session.scoredPendingIds?.clear();
       onNext();
     });
-    card.appendChild(btn);
+    const feedback=card.querySelector('.feedback:not([hidden])') || el.answerDockFeedback.querySelector('.feedback');
+    if(feedback) presentAnswerFeedback(feedback);
+    el.answerDockActions.replaceChildren(btn);
+    el.answerDock.hidden=false;
+    measureAnswerDock();
+    btn.focus({preventScroll:true});
   }
 
   function offerRetry(exercise, isCorrect, feedback) {
@@ -1470,6 +1493,7 @@
     feedback.hidden = false;
     feedback.className = 'feedback bad';
     feedback.textContent = `Пока неверно. Попробуй ещё раз · осталось попыток: ${3 - exercise.failedAttempts}`;
+    if(el.answerDock) {el.answerDockProgress.textContent='';presentAnswerFeedback(feedback);}
     return true;
   }
 
@@ -1483,6 +1507,7 @@
     }
     state.session.answered = true;
     Array.from(grid.children).forEach((btn) => {
+      btn.disabled=true;
       btn.classList.add('disabled-choice');
       if (btn.textContent === exercise.correctAnswer) btn.classList.add('correct');
       else if (btn.textContent === chosen && !isCorrect) btn.classList.add('incorrect');
@@ -1504,6 +1529,7 @@
         Ex.isPossibleTypo(value, exercise.correctAnswer, options)) {
       feedback.hidden = false; feedback.className = 'feedback bad';
       feedback.textContent = 'Возможно, опечатка. Проверь написание — попытка не потрачена.';
+      presentAnswerFeedback(feedback);
       input.focus(); return;
     }
     const finish = correct => {
@@ -1789,6 +1815,7 @@
       note.className = 'feedback ok';
       note.textContent = '✓ Все пары найдены!';
       card.appendChild(note);
+      el.answerDockProgress.textContent=`${exercise.termIds.length} слова · +1`;
       appendContinueButton(card, () => {
         state.session.queue = state.session.queue.filter((id) => !exercise.termIds.includes(id));
         saveSession();
@@ -2009,19 +2036,16 @@
       return `
         <div class="word-row">
           <div class="word-row-top">
-            <div class="word-row-term">${escapeHtml(t.term)} <span class="word-row-translation">— ${escapeHtml(t.translation)}</span></div>
-            <div class="word-row-actions">
-              ${badgeFor(t)}
-              <button class="word-edit-btn" type="button" data-edit-term="${escapeHtml(t.id)}" aria-label="Изменить ${escapeHtml(t.term)}">Изменить</button>
-            </div>
+            <div class="word-row-term">${escapeHtml(t.term)}</div>
+            <div class="word-row-translation">${escapeHtml(t.translation)}</div>
           </div>
           <div class="term-source">${escapeHtml(termSourceLabel(t))}</div>
-          <div class="word-row-details">
-            <span>Верных ответов: ${t.correct_count} / ${t.attempts}</span>
-            <span>Для изучения: ${Srs.effectiveMastery(t, intervals)} / ${intervals.length}</span>
-            <span>${t.status==='learned' ? 'Напоминание: '+nextReview : 'Можно продолжать сейчас'}</span>
-            <span class="mastery-dots">${dots}</span>
+          <div class="word-row-actions">
+              ${badgeFor(t)}
+              <button class="word-edit-btn" type="button" data-edit-term="${escapeHtml(t.id)}" aria-label="Изменить ${escapeHtml(t.term)}">Изменить</button>
           </div>
+          <div class="word-row-progress"><span>${Srs.effectiveMastery(t, intervals)} / ${intervals.length} для изучения</span><span class="mastery-dots" aria-hidden="true">${dots}</span></div>
+          <details class="word-row-history"><summary>Статистика</summary><div class="word-row-details"><span>Верных ответов: ${t.correct_count} из ${t.attempts}</span>${t.status==='learned' ? `<span>Напоминание: ${nextReview}</span>` : ''}</div></details>
         </div>
       `;
     }).join('');
@@ -2146,6 +2170,7 @@
       btnHomeAddSet: $('#btnHomeAddSet'),
       learnCounter: $('#learnCounter'),
       exerciseCard: $('#exerciseCard'),
+      answerDock:$('#answerDock'),answerDockFeedback:$('#answerDockFeedback'),answerDockProgress:$('#answerDockProgress'),answerDockActions:$('#answerDockActions'),
       learnEmpty: $('#learnEmpty'),
       btnLearnEmptyToReview: $('#btnLearnEmptyToReview'),
 
@@ -2444,6 +2469,17 @@
 
   async function boot() {
     cacheDom();
+    if(window.ResizeObserver) new ResizeObserver(measureAnswerDock).observe(el.answerDock);
+    const updateVisibleViewport=()=>{
+      const viewport=window.visualViewport;
+      const offset=viewport ? Math.max(0,window.innerHeight-viewport.height-viewport.offsetTop) : 0;
+      document.documentElement.style.setProperty('--keyboard-offset',`${Math.round(offset)}px`);
+      measureAnswerDock();
+    };
+    window.addEventListener('resize',updateVisibleViewport);
+    window.visualViewport?.addEventListener('resize',updateVisibleViewport);
+    window.visualViewport?.addEventListener('scroll',updateVisibleViewport);
+    updateVisibleViewport();
     initTheme();
     initReviewSize();
     wireEvents();
